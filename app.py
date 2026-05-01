@@ -8,7 +8,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-st.set_page_config(page_title="CastIQ Pro – Durban Boat Intelligence V3", page_icon="🎣", layout="wide")
+st.set_page_config(page_title="CastIQ Pro – Durban Boat Intelligence V5", page_icon="🎣", layout="wide")
 
 ROOT = Path.cwd()
 SPOTS_CSV = ROOT / "durban_boat_fishing_spots.csv"
@@ -265,6 +265,81 @@ def score_spot(row, wind_speed, gust, wave_h, wave_period, launch_lat, launch_lo
     total = max(0, min(100, int((safety * 0.38) + bait_bonus + target_bonus + structure_bonus + boat_bonus - crowd_penalty)))
     return total, distance
 
+
+# ---------------------------
+# Species bait / trace intelligence
+# ---------------------------
+SPECIES_GUIDE = {
+    "kob": {
+        "bait": "Chokka + sardine combo, mackerel fillet, live mullet if available.",
+        "trace": "Sliding sinker or running trace; 5/0–8/0 circle/J-hook; 0.60–0.80 mm leader.",
+        "setup": "Fish near sand/reef edges, gutters and dirty-water edges. Slow drift or anchor only if safe.",
+        "bait_img": "images/bait_kob.png", "trace_img": "images/trace_kob.png", "setup_img": "images/setup_kob.png",
+    },
+    "couta": {
+        "bait": "Live mackerel, dead mackerel, walla-walla, redeye sardine; add light wire.",
+        "trace": "Couta trace with wire, treble/stinger hook and small duster/skirt if needed.",
+        "setup": "Slow troll/live bait around bait reefs and wreck edges; work up-current side first.",
+        "bait_img": "images/bait_couta.png", "trace_img": "images/trace_couta.png", "setup_img": "images/setup_couta.png",
+    },
+    "tuna": {
+        "bait": "Live mackerel, sardine chum, small feathers/spoons when birds or surface activity shows.",
+        "trace": "Fluorocarbon leader, strong swivel, 4/0–7/0 hook; keep hardware light and clean.",
+        "setup": "Watch birds, bait balls and current colour lines; drift baits behind the boat.",
+        "bait_img": "images/bait_tuna.png", "trace_img": "images/trace_tuna.png", "setup_img": "images/setup_tuna.png",
+    },
+    "snoek": {
+        "bait": "Small spoon, fillet strip, redeye/sardine, small live bait when snoek are feeding.",
+        "trace": "Light wire bite trace or heavy fluorocarbon; small sharp hooks/spoons.",
+        "setup": "Work early morning current lines, backline edges and bait pockets north of Durban.",
+        "bait_img": "images/bait_snoek.png", "trace_img": "images/trace_snoek.png", "setup_img": "images/setup_snoek.png",
+    },
+    "dorade": {
+        "bait": "Small live bait, sardine strip, squid strip; bright lures around floating debris.",
+        "trace": "Fluorocarbon leader, 3/0–6/0 hook; avoid heavy visible hardware.",
+        "setup": "Run current lines, floating debris and warm blue-water edges; keep a pitch bait ready.",
+        "bait_img": "images/bait_dorade.png", "trace_img": "images/trace_dorade.png", "setup_img": "images/setup_dorade.png",
+    },
+    "bait": {
+        "bait": "Sabiki/jigs for mackerel, mozzies and shad; small squid strips if needed.",
+        "trace": "Sabiki rig with sinker; keep spare rigs ready because tangles happen fast.",
+        "setup": "Start at Containers, Barge, Caissons or Fontao; mark bait balls on sonar.",
+        "bait_img": "images/bait_bait.png", "trace_img": "images/trace_bait.png", "setup_img": "images/setup_bait.png",
+    },
+    "general": {
+        "bait": "Mackerel, sardine, squid/chokka and live bait if you can get it.",
+        "trace": "Carry: couta wire trace, running trace, fluorocarbon leader and sabiki bait rig.",
+        "setup": "Bait first, then fish structure edges and current lines. Move if no bait shows.",
+        "bait_img": "images/bait_general.png", "trace_img": "images/trace_general.png", "setup_img": "images/setup_general.png",
+    },
+}
+
+def image_or_note(path_str, caption):
+    path = ROOT / path_str
+    if path.exists():
+        st.image(str(path), caption=caption, use_container_width=True)
+    else:
+        st.info(f"Add image: {path_str}")
+
+def render_species_guide(target):
+    guide = SPECIES_GUIDE.get(str(target).lower(), SPECIES_GUIDE["general"])
+    st.subheader("🎣 Bait, setup and trace for selected target")
+    st.markdown(f"""
+<div class="best-card">
+<h3>{str(target).upper()} setup</h3>
+<div><b>Bait:</b> {guide['bait']}</div>
+<div><b>Trace:</b> {guide['trace']}</div>
+<div><b>Boat setup:</b> {guide['setup']}</div>
+</div>
+""", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        image_or_note(guide["bait_img"], "Bait suggestion")
+    with c2:
+        image_or_note(guide["trace_img"], "Trace")
+    with c3:
+        image_or_note(guide["setup_img"], "Setup")
+
 # ---------------------------
 # Map
 # ---------------------------
@@ -290,7 +365,7 @@ def render_map(spots_view, stops, drift_lines, ais_df, launch_lat, launch_lon, s
 
     cluster = MarkerCluster(name="Fishing marks").add_to(m)
     for _, r in spots_view.iterrows():
-        popup = f"<b>{r['name']}</b><br>Score: {r['score']}/100<br>Distance: {r['distance_km']} km<br>Boat stops nearby: {r.get('boat_stop_count_nearby',0)}<br><a href='{google_maps_url(r['lat'], r['lon'])}' target='_blank'>Google Maps</a> | <a href='{navionics_url(r['lat'], r['lon'])}' target='_blank'>Navionics</a><br>{r.get('strategy_note','')}"
+        popup = f"<b>{r['name']}</b><br>Score: {r['score']}/100<br>Depth: {r.get('depth','Unknown')}<br>Distance: {r['distance_km']} km<br>Boat stops nearby: {r.get('boat_stop_count_nearby',0)}<br><a href='{google_maps_url(r['lat'], r['lon'])}' target='_blank'>Google Maps</a> | <a href='{navionics_url(r['lat'], r['lon'])}' target='_blank'>Navionics</a><br>{r.get('strategy_note','')}"
         folium.Marker([r["lat"], r["lon"]], tooltip=f"{r['name']} | {r['score']}", popup=popup).add_to(cluster)
 
     if not stops.empty:
@@ -414,6 +489,8 @@ spots["score"] = scores
 spots["distance_km"] = distances
 spots_view = spots.sort_values("score", ascending=False).head(max_spots).copy()
 
+render_species_guide(target)
+
 available_names = [str(x) for x in spots_view["name"].tolist()]
 if available_names and (not st.session_state.selected_destination_name or st.session_state.selected_destination_name not in available_names):
     st.session_state.selected_destination_name = available_names[0]
@@ -428,7 +505,7 @@ if selected_spot is not None:
     st.markdown(f"""
 <div class="best-card">
 <h3>🔥 Active destination: {selected_spot['name']}</h3>
-<div class="small-muted">Score {int(selected_spot['score'])}/100 · {float(selected_spot['distance_km']):.1f} km from launch · Coordinates {float(selected_spot['lat']):.6f}, {float(selected_spot['lon']):.6f}</div>
+<div class="small-muted">Score {int(selected_spot['score'])}/100 · Depth {selected_spot.get('depth','Unknown')} · {float(selected_spot['distance_km']):.1f} km from launch · Coordinates {float(selected_spot['lat']):.6f}, {float(selected_spot['lon']):.6f}</div>
 </div>
 """, unsafe_allow_html=True)
     a, b = st.columns(2)
@@ -443,7 +520,7 @@ for i, (_, r) in enumerate(spots_view.iterrows(), start=1):
         st.markdown(f"""
 ### {'✅' if is_selected else '📍'} #{i} {r['name']} — {int(r['score'])}/100
 **Coordinates:** `{float(r['lat']):.6f}, {float(r['lon']):.6f}`  
-**Distance:** `{float(r['distance_km']):.1f} km` · **Boat stops nearby:** `{r.get('boat_stop_count_nearby', 0)}`  
+**Depth:** `{r.get('depth','Unknown')}` · **Distance:** `{float(r['distance_km']):.1f} km` · **Boat stops nearby:** `{r.get('boat_stop_count_nearby', 0)}`  
 {r.get('strategy_note','')}
 """)
         if is_selected:
