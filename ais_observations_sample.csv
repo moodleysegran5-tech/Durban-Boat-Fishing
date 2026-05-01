@@ -1,0 +1,13 @@
+vessel_name,timestamp,lat,lon,speed_knots,source_note
+Sample Charter A,2026-04-20 06:10,-29.82450,31.07560,18.2,Transit from Durban
+Sample Charter A,2026-04-20 06:38,-29.82390,31.07610,2.4,Slow drift near Containers
+Sample Charter A,2026-04-20 06:44,-29.82410,31.07580,1.8,Slow drift near Containers
+Sample Charter A,2026-04-20 07:05,-29.78900,31.07550,16.0,Transit north
+Sample Charter A,2026-04-20 07:30,-29.78950,31.07500,2.2,Slow drift near Virginia Barge area
+Sample Charter A,2026-04-20 07:38,-29.78920,31.07530,1.6,Slow drift near Virginia Barge area
+Sample Charter B,2026-04-21 06:25,-29.77490,31.09000,17.5,Transit
+Sample Charter B,2026-04-21 06:58,-29.77470,31.09040,2.7,Slow stop near Caissons/reef line
+Sample Charter B,2026-04-21 07:05,-29.77450,31.09010,2.1,Slow stop near Caissons/reef line
+Sample Charter C,2026-04-22 07:50,-29.74520,31.09630,13.8,Transit to Fontao
+Sample Charter C,2026-04-22 08:12,-29.74500,31.09620,2.8,Slow drift near Fontao
+Sample Charter C,2026-04-22 08:20,-29.74480,31.09610,1.9,Slow drift near Fontao

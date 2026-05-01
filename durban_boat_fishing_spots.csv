@@ -1,0 +1,13 @@
+name,type,lat,lon,depth,target_species,strategy_note,source
+Durban Harbour Mouth,launch/reference,-29.8689,31.0617,0-5m,"launch, harbour plume, bait movement",Use as route start only; avoid shipping lanes,Port/reference
+Containers,bait reef,-29.8245,31.075583333333334,~22m,"mackerel, shad, sea pike, mozzies, couta nearby",First bait stop when running north,Ultimate Angling/Sealine
+Dozer,bait/game,-29.808716666666665,31.1,~26m,"bait, couta, daga winter, yellowfin balloon bait",Good if Containers is quiet,Ultimate Angling/Sealine
+Virginia Barge / T Barge,artificial reef,-29.789166666666667,31.075,~23-27m,"bait, queenfish, gamefish, bottom fish","Power drift around structure, not over boats",Ultimate Angling/SpearfishingSA
+Caissons,bait reef,-29.774833333333333,31.09,~25m,"shad, baitfish, gamefish",Good second bait stop north of Barge,Ultimate Angling/Sealine
+Fontao / Umhlanga Barge,wreck/artificial reef,-29.745166666666666,31.096383333333332,~24-27m,"bait, kingfish, queenfish, dorado, snoek/couta nearby",Popular with dive boats; keep distance,Ultimate Angling/Sealine
+Fontao Alt Mark,wreck/artificial reef,-29.743383333333334,31.096083333333333,~24-27m,"tuna, kingfish, queenfish, dorado",Alternate public mark close to Fontao,Hybrid Angling
+No.1 Reef,reef/gamefish,-29.846533333333333,31.101683333333334,21-30m+,"couta, dorado, sailfish, marlin, bottom fish, bait",Advanced area near shipping lane; watch traffic/current,Hybrid Angling/DUC
+Shit Pipe,deep bait/deeper zone,-29.898066666666665,31.0865,40-46m,"mackerel, deeper species",Can be hard with current; use heavier sinkers,Ultimate Angling/Sealine
+Umdloti Drop-off,drop-off/gamefish,-29.6683,31.134516666666666,drop-off,"marlin, sailfish, wahoo, gamefish, snoek inshore",Run when sea is settled; check fuel/safety margin,Hybrid Angling
+Seabelle Drop-off / La Mercy,drop-off/reef,-29.631683333333335,31.1522,varies,"snoek, couta",North coast option if Durban basin is quiet,Hybrid Angling
+Westbrook / Stud Rock,reef,-29.6045,31.176216666666665,varies,"couta, snoek",Summer/autumn option,Hybrid Angling
