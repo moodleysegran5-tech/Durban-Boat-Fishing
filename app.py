@@ -1019,40 +1019,64 @@ Planning tool only. Verify weather, surf-launch risk, skipper limits, fuel, comm
 
 
 # ---------------------------
-# UI Styling + Navigation
+# UI Styling + Mobile Bottom Navigation
 # ---------------------------
 st.markdown("""
 <style>
-.block-container {padding-top: 1rem; padding-bottom: 2rem; max-width: 1100px;}
+.block-container {padding-top: 1rem; padding-bottom: 6.2rem; max-width: 1100px;}
 [data-testid="stSidebar"] {display: none;}
 .big-card {border: 1px solid rgba(49,51,63,.18); border-radius: 18px; padding: 16px; margin-bottom: 12px;}
 .best-card {border: 2px solid rgba(255,75,75,.55); border-radius: 22px; padding: 18px; margin-bottom: 14px; background: rgba(255,75,75,.06);}
 .small-muted {opacity: .78; font-size: .92rem;}
 div.stButton > button {width: 100%; min-height: 48px; border-radius: 14px; font-weight: 700;}
 div[data-testid="stMetric"] {border: 1px solid rgba(49,51,63,.14); border-radius: 16px; padding: 10px;}
-@media (max-width: 768px) {
-  .block-container {padding-left: .75rem; padding-right: .75rem;}
-  h1 {font-size: 1.65rem !important;}
-  h2, h3 {font-size: 1.25rem !important;}
-}
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+.castiq-bottom-nav {position: fixed; left: 0; right: 0; bottom: 0; z-index: 999999; background: rgba(255,255,255,0.96); backdrop-filter: blur(14px); border-top: 1px solid rgba(49,51,63,.16); box-shadow: 0 -8px 28px rgba(0,0,0,.12); padding: 8px 8px calc(8px + env(safe-area-inset-bottom));}
+.castiq-nav-inner {max-width: 760px; margin: 0 auto; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px;}
+.castiq-nav-item {text-decoration: none !important; color: #30333f !important; text-align: center; border-radius: 18px; padding: 9px 4px 8px; font-size: 0.78rem; line-height: 1.1rem; font-weight: 750; border: 1px solid rgba(49,51,63,.12); background: rgba(248,249,252,.92); min-height: 52px; display: flex; align-items: center; justify-content: center; flex-direction: column;}
+.castiq-nav-item span {display: block; font-size: 1.12rem; line-height: 1.25rem;}
+.castiq-nav-item.active {color: white !important; background: linear-gradient(135deg, #0f766e, #0ea5e9); border-color: rgba(14,165,233,.45); box-shadow: 0 6px 14px rgba(14,165,233,.28);}
+@media (min-width: 900px) {.castiq-bottom-nav {left: 50%; right: auto; transform: translateX(-50%); width: min(760px, calc(100% - 24px)); bottom: 14px; border: 1px solid rgba(49,51,63,.14); border-radius: 28px; padding: 8px;}}
+@media (max-width: 768px) {.block-container {padding-left: .75rem; padding-right: .75rem; padding-bottom: 6.8rem;} h1 {font-size: 1.65rem !important;} h2, h3 {font-size: 1.25rem !important;} .castiq-nav-item {font-size: .72rem; min-height: 54px; border-radius: 16px;}}
 </style>
 """, unsafe_allow_html=True)
 
-tab_home, tab_trip, tab_regs, tab_packages = st.tabs([
-    "🏠 Home",
-    "🎣 Trip Planner",
-    "📜 Regulations",
-    "💼 Packages",
-])
 
-with tab_home:
+def get_current_page():
+    try:
+        page = st.query_params.get("page", "home")
+    except Exception:
+        page = "home"
+    if isinstance(page, list):
+        page = page[0] if page else "home"
+    page = str(page).lower().strip()
+    return page if page in {"home", "trip", "rules", "packages"} else "home"
+
+
+def render_bottom_nav(current_page):
+    def cls(page):
+        return "castiq-nav-item active" if current_page == page else "castiq-nav-item"
+    st.markdown(f"""
+<div class="castiq-bottom-nav">
+  <div class="castiq-nav-inner">
+    <a class="{cls('home')}" href="?page=home" target="_self"><span>🏠</span>Home</a>
+    <a class="{cls('trip')}" href="?page=trip" target="_self"><span>🎣</span>Plan</a>
+    <a class="{cls('rules')}" href="?page=rules" target="_self"><span>📜</span>Rules</a>
+    <a class="{cls('packages')}" href="?page=packages" target="_self"><span>💼</span>Packages</a>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+
+current_page = get_current_page()
+render_bottom_nav(current_page)
+
+if current_page == "home":
     intro_page()
-
-with tab_trip:
+elif current_page == "trip":
     trip_planner_page()
-
-with tab_regs:
+elif current_page == "rules":
     regulations_page()
-
-with tab_packages:
+elif current_page == "packages":
     packages_page()
