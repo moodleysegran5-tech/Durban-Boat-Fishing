@@ -1,16 +1,19 @@
+
 import math
 import os
-import json
-from io import StringIO
-from urllib.parse import quote
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, date, time, timedelta
 
 import pandas as pd
 import requests
 import streamlit as st
 
-st.set_page_config(page_title="CastIQ Pro – Durban Boat Intelligence V8", page_icon="🎣", layout="wide")
+st.set_page_config(
+    page_title="CastIQ Pro – Durban Boat Intelligence V8",
+    page_icon="🎣",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
 ROOT = Path.cwd()
 SPOTS_CSV = ROOT / "durban_boat_fishing_spots.csv"
@@ -18,8 +21,13 @@ DATA_DIR = ROOT / "data"
 DATA_DIR.mkdir(exist_ok=True)
 TRACKS_CSV = DATA_DIR / "vessel_tracks.csv"
 CACHE_CSV = DATA_DIR / "live_ais_cache.csv"
+
 DURBAN_LAUNCH = (-29.8689, 31.0617)
 DURBAN_BBOX = {"min_lat": -29.98, "max_lat": -29.55, "min_lon": 30.95, "max_lon": 31.28}
+
+PAYGATE_STANDARD_URL = os.getenv("PAYGATE_STANDARD_URL", "https://secure.paygate.co.za/payweb3/process.trans?REFERENCE=CASTIQ_STD_1000")
+PAYGATE_PREMIUM_URL = os.getenv("PAYGATE_PREMIUM_URL", "https://secure.paygate.co.za/payweb3/process.trans?REFERENCE=CASTIQ_PREM_20000")
+
 
 # ---------------------------
 # Helpers
@@ -30,29 +38,47 @@ def get_secret(name, default=""):
     except Exception:
         return os.getenv(name, default)
 
+
 def haversine_km(lat1, lon1, lat2, lon2):
     R = 6371.0
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dl = math.radians(lon2 - lon1)
+    p1, p2 = math.radians(float(lat1)), math.radians(float(lat2))
+    dphi = math.radians(float(lat2) - float(lat1))
+    dl = math.radians(float(lon2) - float(lon1))
     a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
     return 2 * R * math.asin(math.sqrt(a))
 
+
 def destination_point(lat, lon, bearing_deg, distance_km):
     R = 6371.0
-    brng = math.radians(bearing_deg)
-    lat1 = math.radians(lat)
-    lon1 = math.radians(lon)
-    d = distance_km / R
+    brng = math.radians(float(bearing_deg))
+    lat1 = math.radians(float(lat))
+    lon1 = math.radians(float(lon))
+    d = float(distance_km) / R
     lat2 = math.asin(math.sin(lat1) * math.cos(d) + math.cos(lat1) * math.sin(d) * math.cos(brng))
     lon2 = lon1 + math.atan2(math.sin(brng) * math.sin(d) * math.cos(lat1), math.cos(d) - math.sin(lat1) * math.sin(lat2))
     return math.degrees(lat2), math.degrees(lon2)
 
+
 def google_maps_url(lat, lon):
     return f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
 
+
 def navionics_url(lat, lon):
     return f"https://webapp.navionics.com/?lat={lat}&lng={lon}&zoom=13"
+
+
+def clean_key(txt):
+    return str(txt).replace(" ", "_").replace("/", "_").replace("'", "").replace('"', "").replace(".", "_")
+
+
+def safe_float(v, default=0.0):
+    try:
+        if pd.isna(v):
+            return default
+        return float(v)
+    except Exception:
+        return default
+
 
 def normalise_columns(df):
     df = df.copy()
@@ -81,33 +107,57 @@ def normalise_columns(df):
     df = df[(df["lat"].between(-31, -28)) & (df["lon"].between(29, 33))]
     return df
 
+
 # ---------------------------
 # Data loading
 # ---------------------------
 @st.cache_data(ttl=1800)
 def load_spots():
     if not SPOTS_CSV.exists():
-        st.error("Missing durban_boat_fishing_spots.csv. Put it in C:\\Users\\Admin\\Desktop\\Durban Fishing next to app.py")
+        st.error("Missing durban_boat_fishing_spots.csv. Keep it in the same GitHub root as app.py.")
         st.stop()
+
     df = pd.read_csv(SPOTS_CSV)
-    df.columns = [c.strip().lower() for c in df.columns]
-    return df
+    df.columns = [str(c).strip().lower() for c in df.columns]
+
+    for col in ["name", "lat", "lon"]:
+        if col not in df.columns:
+            st.error(f"Your CSV must include column: {col}")
+            st.stop()
+
+    if "depth" not in df.columns:
+        df["depth"] = "Unknown"
+    if "type" not in df.columns:
+        df["type"] = "spot"
+    if "target_species" not in df.columns:
+        df["target_species"] = "general"
+    if "strategy_note" not in df.columns:
+        df["strategy_note"] = ""
+
+    df["lat"] = pd.to_numeric(df["lat"], errors="coerce")
+    df["lon"] = pd.to_numeric(df["lon"], errors="coerce")
+    return df.dropna(subset=["lat", "lon"])
+
 
 @st.cache_data(ttl=900)
 def get_open_meteo(lat=-29.86, lon=31.06):
     weather_url = "https://api.open-meteo.com/v1/forecast"
     marine_url = "https://marine-api.open-meteo.com/v1/marine"
     weather_params = {
-        "latitude": lat, "longitude": lon,
+        "latitude": lat,
+        "longitude": lon,
         "hourly": "wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation",
         "current": "wind_speed_10m,wind_direction_10m,wind_gusts_10m",
-        "timezone": "Africa/Johannesburg", "forecast_days": 1,
+        "timezone": "Africa/Johannesburg",
+        "forecast_days": 2,
     }
     marine_params = {
-        "latitude": lat, "longitude": lon,
+        "latitude": lat,
+        "longitude": lon,
         "hourly": "wave_height,wave_direction,wave_period",
         "current": "wave_height,wave_direction,wave_period",
-        "timezone": "Africa/Johannesburg", "forecast_days": 1,
+        "timezone": "Africa/Johannesburg",
+        "forecast_days": 2,
     }
     try:
         w = requests.get(weather_url, params=weather_params, timeout=12).json()
@@ -116,156 +166,127 @@ def get_open_meteo(lat=-29.86, lon=31.06):
     except Exception:
         return {}, {}
 
+
 # ---------------------------
-# NOAA Ocean Intelligence: SST + chlorophyll
+# NOAA Ocean intelligence
 # ---------------------------
-def _read_erddap_csv(text):
-    """ERDDAP .csv returns a header row and a units row. This safely drops the units row."""
-    if not text or text.lstrip().startswith("Error"):
-        return pd.DataFrame()
-    try:
-        return pd.read_csv(StringIO(text), skiprows=[1])
-    except Exception:
-        return pd.DataFrame()
-
-def _erddap_griddap_csv(base_url, dataset_id, variable, constraints, timeout=18):
-    query = f"{variable}{constraints}"
-    url = f"{base_url.rstrip('/')}/erddap/griddap/{dataset_id}.csv?{quote(query, safe='[]():,.-_')}"
-    r = requests.get(url, timeout=timeout)
-    r.raise_for_status()
-    return _read_erddap_csv(r.text)
-
-@st.cache_data(ttl=21600, show_spinner=False)
-def fetch_noaa_sst_point(lat, lon):
-    """Fetch MUR/JPL sea surface temperature from ERDDAP. Returns dict; never crashes the app."""
-    lat = round(float(lat), 3)
-    lon = round(float(lon), 3)
-    endpoints = [
-        "https://coastwatch.pfeg.noaa.gov",
-        "https://erddap.marine.usf.edu",
-    ]
-    for base in endpoints:
-        try:
-            df = _erddap_griddap_csv(base, "jplMURSST41", "analysed_sst", f"[(last)][({lat})][({lon})]")
-            if not df.empty and "analysed_sst" in df.columns:
-                value = pd.to_numeric(df["analysed_sst"], errors="coerce").dropna()
-                if not value.empty:
-                    ts = str(df["time"].iloc[0]) if "time" in df.columns else "latest"
-                    return {"ok": True, "sst_c": float(value.iloc[0]), "sst_time": ts, "sst_source": "NOAA/JPL MUR SST"}
-        except Exception:
-            continue
-    return {"ok": False, "sst_c": None, "sst_time": None, "sst_source": "NOAA/JPL MUR SST unavailable"}
-
-@st.cache_data(ttl=21600, show_spinner=False)
-def fetch_noaa_chlorophyll_point(lat, lon):
-    """Fetch Sentinel-3A OLCI chlorophyll-a from NOAA CoastWatch ERDDAP. Returns dict; never crashes the app."""
-    lat = round(float(lat), 3)
-    lon = round(float(lon), 3)
-    try:
-        df = _erddap_griddap_csv(
-            "https://coastwatch.noaa.gov",
-            "noaacwS3AOLCIchlaDaily",
-            "chlor_a",
-            f"[(last)][(0.0)][({lat})][({lon})]",
-        )
-        if not df.empty and "chlor_a" in df.columns:
-            value = pd.to_numeric(df["chlor_a"], errors="coerce").dropna()
-            if not value.empty:
-                ts = str(df["time"].iloc[0]) if "time" in df.columns else "latest"
-                return {"ok": True, "chl": float(value.iloc[0]), "chl_time": ts, "chl_source": "NOAA CoastWatch Sentinel-3A chlorophyll"}
-    except Exception:
-        pass
-    return {"ok": False, "chl": None, "chl_time": None, "chl_source": "NOAA chlorophyll unavailable"}
-
-@st.cache_data(ttl=21600, show_spinner=False)
-def build_ocean_intelligence_for_spots(spots_json):
-    """Build SST/chlorophyll signals for current recommendation set.
-    Uses centre + 4 nearby samples to estimate edges. Kept small for Streamlit Cloud speed.
+@st.cache_data(ttl=21600)
+def fetch_noaa_sst(lat, lon):
     """
-    spots = pd.read_json(StringIO(spots_json))
-    rows = []
-    offsets = [(0, 0), (0.045, 0), (-0.045, 0), (0, 0.045), (0, -0.045)]
-    for _, r in spots.iterrows():
-        lat = float(r["lat"])
-        lon = float(r["lon"])
-        sst_vals, chl_vals = [], []
-        centre_sst = fetch_noaa_sst_point(lat, lon)
-        centre_chl = fetch_noaa_chlorophyll_point(lat, lon)
-        for dlat, dlon in offsets:
-            sst = fetch_noaa_sst_point(lat + dlat, lon + dlon)
-            chl = fetch_noaa_chlorophyll_point(lat + dlat, lon + dlon)
-            if sst.get("sst_c") is not None:
-                sst_vals.append(float(sst["sst_c"]))
-            if chl.get("chl") is not None:
-                chl_vals.append(float(chl["chl"]))
-        sst_c = centre_sst.get("sst_c")
-        chl = centre_chl.get("chl")
-        sst_edge = (max(sst_vals) - min(sst_vals)) if len(sst_vals) >= 2 else None
-        chl_edge = (max(chl_vals) - min(chl_vals)) if len(chl_vals) >= 2 else None
-        ocean_score = 0
-        signals = []
-        if sst_c is not None:
-            if 22 <= sst_c <= 27:
-                ocean_score += 12
-                signals.append("SST in good Durban pelagic band")
-            elif 20 <= sst_c < 22 or 27 < sst_c <= 28.5:
-                ocean_score += 6
-                signals.append("SST usable")
-        if sst_edge is not None:
-            if sst_edge >= 0.6:
-                ocean_score += 14
-                signals.append("strong temperature break nearby")
-            elif sst_edge >= 0.3:
-                ocean_score += 8
-                signals.append("moderate temperature edge nearby")
-        if chl is not None:
-            if 0.12 <= chl <= 1.8:
-                ocean_score += 12
-                signals.append("chlorophyll supports bait signal")
-            elif 1.8 < chl <= 4.0:
-                ocean_score += 5
-                signals.append("green water/high plankton; check water clarity")
-            elif chl < 0.12:
-                ocean_score += 3
-                signals.append("clean water; look for edge, bait or birds")
-        if chl_edge is not None:
-            if chl_edge >= 0.4:
-                ocean_score += 12
-                signals.append("chlorophyll edge/bait boundary nearby")
-            elif chl_edge >= 0.15:
-                ocean_score += 6
-                signals.append("weak/moderate chlorophyll edge")
-        rows.append({
-            "name": r.get("name", ""),
-            "lat": lat,
-            "lon": lon,
-            "sst_c": round(sst_c, 2) if sst_c is not None else None,
-            "sst_edge_c": round(sst_edge, 2) if sst_edge is not None else None,
-            "sst_time": centre_sst.get("sst_time"),
-            "chlorophyll_mg_m3": round(chl, 3) if chl is not None else None,
-            "chlorophyll_edge": round(chl_edge, 3) if chl_edge is not None else None,
-            "chl_time": centre_chl.get("chl_time"),
-            "ocean_score": int(min(50, ocean_score)),
-            "ocean_signal": "; ".join(signals) if signals else "No live ocean signal returned; use weather/structure fallback",
-        })
-    return pd.DataFrame(rows)
+    NOAA ERDDAP MUR SST lookup.
+    Returns approximate Celsius SST near the selected coordinate.
+    """
+    base = "https://coastwatch.pfeg.noaa.gov/erddap/griddap/jplMURSST41.csv"
+    # broad fallback: latest time near point. ERDDAP supports last() but some mirrors are strict.
+    queries = [
+        f"{base}?analysed_sst%5B(last)%5D%5B({lat})%5D%5B({lon})%5D",
+        f"{base}?analysed_sst[(last)][({lat})][({lon})]",
+    ]
+    for url in queries:
+        try:
+            r = requests.get(url, timeout=18)
+            if r.status_code != 200:
+                continue
+            lines = [x for x in r.text.splitlines() if x.strip()]
+            if len(lines) >= 3:
+                val = pd.to_numeric(lines[-1].split(",")[-1], errors="coerce")
+                if pd.notna(val):
+                    # MUR is usually Kelvin.
+                    c = float(val) - 273.15 if float(val) > 100 else float(val)
+                    return round(c, 2), "live"
+        except Exception:
+            pass
+    return None, "unavailable"
 
-def merge_ocean_intel(spots_view):
-    if spots_view.empty:
-        return spots_view, pd.DataFrame()
-    ocean_df = build_ocean_intelligence_for_spots(spots_view[["name", "lat", "lon"]].to_json(orient="records"))
-    out = spots_view.merge(ocean_df[["name", "sst_c", "sst_edge_c", "chlorophyll_mg_m3", "chlorophyll_edge", "ocean_score", "ocean_signal"]], on="name", how="left")
-    out["ocean_score"] = out["ocean_score"].fillna(0).astype(int)
-    out["score"] = (out["score"].astype(int) + (out["ocean_score"] * 0.6).round().astype(int)).clip(upper=100)
-    out = out.sort_values("score", ascending=False).reset_index(drop=True)
-    return out, ocean_df
+
+@st.cache_data(ttl=21600)
+def fetch_noaa_chlorophyll(lat, lon):
+    """
+    NOAA CoastWatch ERDDAP chlorophyll lookup.
+    Uses CoastWatch monthly/daily chlorophyll dataset when available.
+    """
+    possible = [
+        "https://coastwatch.pfeg.noaa.gov/erddap/griddap/erdMH1chlamday.csv?chlorophyll%5B(last)%5D%5B({lat})%5D%5B({lon})%5D",
+        "https://coastwatch.pfeg.noaa.gov/erddap/griddap/erdMH1chlamday.csv?chlor_a%5B(last)%5D%5B({lat})%5D%5B({lon})%5D",
+        "https://coastwatch.pfeg.noaa.gov/erddap/griddap/erdMH1chlamday.csv?chlorophyll[(last)][({lat})][({lon})]",
+    ]
+    for template in possible:
+        url = template.format(lat=lat, lon=lon)
+        try:
+            r = requests.get(url, timeout=18)
+            if r.status_code != 200:
+                continue
+            lines = [x for x in r.text.splitlines() if x.strip()]
+            if len(lines) >= 3:
+                val = pd.to_numeric(lines[-1].split(",")[-1], errors="coerce")
+                if pd.notna(val):
+                    return round(float(val), 4), "live"
+        except Exception:
+            pass
+    return None, "unavailable"
+
+
+def ocean_signal_score(sst_c, chl):
+    score = 50
+    notes = []
+
+    if sst_c is None:
+        notes.append("SST unavailable")
+    else:
+        if 22 <= sst_c <= 27:
+            score += 20
+            notes.append(f"SST {sst_c:.1f}°C favourable")
+        elif 19 <= sst_c < 22 or 27 < sst_c <= 29:
+            score += 8
+            notes.append(f"SST {sst_c:.1f}°C usable")
+        else:
+            score -= 8
+            notes.append(f"SST {sst_c:.1f}°C less ideal")
+
+    if chl is None:
+        notes.append("chlorophyll unavailable")
+    else:
+        if 0.05 <= chl <= 1.5:
+            score += 20
+            notes.append(f"chlorophyll {chl:.3f} suggests bait productivity")
+        elif 1.5 < chl <= 4:
+            score += 6
+            notes.append(f"chlorophyll {chl:.3f} productive but possibly greener water")
+        else:
+            score -= 5
+            notes.append(f"chlorophyll {chl:.3f} weak/too high signal")
+
+    return max(0, min(100, int(score))), " · ".join(notes)
+
+
+def enrich_ocean_for_spots(spots_df, enabled=True):
+    df = spots_df.copy()
+    ssts, chls, ocean_scores, ocean_notes = [], [], [], []
+    statuses = []
+    for _, r in df.iterrows():
+        if enabled:
+            sst, sst_status = fetch_noaa_sst(float(r["lat"]), float(r["lon"]))
+            chl, chl_status = fetch_noaa_chlorophyll(float(r["lat"]), float(r["lon"]))
+        else:
+            sst, chl, sst_status, chl_status = None, None, "off", "off"
+        oscore, note = ocean_signal_score(sst, chl)
+        ssts.append(sst)
+        chls.append(chl)
+        ocean_scores.append(oscore)
+        ocean_notes.append(note)
+        statuses.append(f"SST:{sst_status} / CHL:{chl_status}")
+    df["sst_c"] = ssts
+    df["chlorophyll"] = chls
+    df["ocean_score"] = ocean_scores
+    df["ocean_note"] = ocean_notes
+    df["ocean_status"] = statuses
+    return df
 
 
 # ---------------------------
-# Live AIS connectors
+# AIS / vessel intelligence
 # ---------------------------
 def fetch_aishub_live(username, bbox):
-    """AISHub webservice. Requires an AISHub username/API access. Limited to once per minute by provider."""
     if not username:
         return pd.DataFrame()
     url = "https://data.aishub.net/ws.php"
@@ -274,8 +295,10 @@ def fetch_aishub_live(username, bbox):
         "format": 1,
         "output": "json",
         "compress": 0,
-        "latmin": bbox["min_lat"], "latmax": bbox["max_lat"],
-        "lonmin": bbox["min_lon"], "lonmax": bbox["max_lon"],
+        "latmin": bbox["min_lat"],
+        "latmax": bbox["max_lat"],
+        "lonmin": bbox["min_lon"],
+        "lonmax": bbox["max_lon"],
     }
     r = requests.get(url, params=params, timeout=20)
     r.raise_for_status()
@@ -289,11 +312,6 @@ def fetch_aishub_live(username, bbox):
     df["source"] = "AISHub live"
     return normalise_columns(df)
 
-def fetch_marinetraffic_placeholder(api_key, bbox):
-    """Placeholder: MarineTraffic endpoint shape depends on subscribed AIS service/package.
-    Use the app upload/manual mode until you have the exact service URL from your MT account.
-    """
-    return pd.DataFrame()
 
 def load_cached_and_manual_tracks(uploaded):
     frames = []
@@ -313,10 +331,11 @@ def load_cached_and_manual_tracks(uploaded):
         except Exception as e:
             st.warning(f"Could not read uploaded file: {e}")
     if not frames:
-        return pd.DataFrame(columns=["vessel_name","mmsi","timestamp","lat","lon","speed_knots","course_deg","source"])
+        return pd.DataFrame(columns=["vessel_name", "mmsi", "timestamp", "lat", "lon", "speed_knots", "course_deg", "source"])
     out = pd.concat(frames, ignore_index=True)
     out = out.drop_duplicates(subset=["mmsi", "vessel_name", "timestamp", "lat", "lon"], keep="last")
     return out
+
 
 def save_live_cache(df):
     if df.empty:
@@ -326,9 +345,7 @@ def save_live_cache(df):
     combined = normalise_columns(combined).drop_duplicates(subset=["mmsi", "vessel_name", "timestamp", "lat", "lon"], keep="last")
     combined.to_csv(CACHE_CSV, index=False)
 
-# ---------------------------
-# Fishing behaviour + drift
-# ---------------------------
+
 def detect_fishing_stops(ais_df, max_speed=3.0, min_points=2, radius_m=550):
     if ais_df.empty:
         return pd.DataFrame()
@@ -354,21 +371,21 @@ def detect_fishing_stops(ais_df, max_speed=3.0, min_points=2, radius_m=550):
     grouped["heat_score"] = (grouped["stop_points"] * 12).clip(upper=100).astype(int)
     return grouped.sort_values(["heat_score", "stop_points"], ascending=False)
 
+
 def compute_drift_lines(points_df, wind_dir, wind_speed, wave_dir, wave_h, hours=1.0):
     if points_df.empty:
         return []
-    # In Durban, nearshore current often dominates. This is a planning estimate: current direction blended with wind and swell.
-    # Wind direction from API is direction wind comes FROM, so drift is roughly +180.
-    wind_to = (wind_dir + 180) % 360 if wind_dir is not None else 45
-    swell_to = wave_dir if wave_dir is not None else wind_to
+    wind_to = (float(wind_dir) + 180) % 360 if wind_dir is not None else 45
+    swell_to = float(wave_dir) if wave_dir is not None else wind_to
     drift_bearing = (0.55 * swell_to + 0.45 * wind_to) % 360
-    speed_kmh = max(0.4, min(3.2, 0.08 * (wind_speed or 10) + 0.55 * (wave_h or 1.0)))
-    distance_km = speed_kmh * hours
+    speed_kmh = max(0.4, min(3.2, 0.08 * (float(wind_speed) or 10) + 0.55 * (float(wave_h) or 1.0)))
+    distance_km = speed_kmh * float(hours)
     lines = []
     for _, r in points_df.head(25).iterrows():
         end_lat, end_lon = destination_point(r["lat"], r["lon"], drift_bearing, distance_km)
         lines.append({"start": (r["lat"], r["lon"]), "end": (end_lat, end_lon), "bearing": drift_bearing, "distance_km": distance_km})
     return lines
+
 
 def enrich_spots(spots, stops):
     spots = spots.copy()
@@ -388,20 +405,41 @@ def enrich_spots(spots, stops):
     spots["boat_intel_bonus"] = spots["boat_stop_count_nearby"].apply(lambda x: min(20, int(x * 2)))
     return spots
 
+
+# ---------------------------
+# Scoring + smart schedule
+# ---------------------------
 def score_spot(row, wind_speed, gust, wave_h, wave_period, launch_lat, launch_lon, target):
     distance = haversine_km(launch_lat, launch_lon, row["lat"], row["lon"])
     safety = 100
-    if wind_speed > 28: safety -= 35
-    elif wind_speed > 20: safety -= 20
-    elif wind_speed > 14: safety -= 10
-    if gust > 35: safety -= 25
-    elif gust > 28: safety -= 15
-    if wave_h > 2.0: safety -= 35
-    elif wave_h > 1.5: safety -= 20
-    elif wave_h > 1.1: safety -= 10
-    if wave_period and wave_period < 8: safety -= 10
-    if distance > 28: safety -= 15
-    elif distance > 15: safety -= 8
+
+    if wind_speed > 28:
+        safety -= 35
+    elif wind_speed > 20:
+        safety -= 20
+    elif wind_speed > 14:
+        safety -= 10
+
+    if gust > 35:
+        safety -= 25
+    elif gust > 28:
+        safety -= 15
+
+    if wave_h > 2.0:
+        safety -= 35
+    elif wave_h > 1.5:
+        safety -= 20
+    elif wave_h > 1.1:
+        safety -= 10
+
+    if wave_period and wave_period < 8:
+        safety -= 10
+
+    if distance > 28:
+        safety -= 15
+    elif distance > 15:
+        safety -= 8
+
     type_txt = str(row.get("type", "")).lower()
     species_txt = (str(row.get("target_species", "")) + " " + str(row.get("strategy_note", ""))).lower()
     bait_bonus = 20 if "bait" in type_txt or "bait" in species_txt else 8
@@ -409,250 +447,127 @@ def score_spot(row, wind_speed, gust, wave_h, wave_period, launch_lat, launch_lo
     structure_bonus = 14 if any(x in type_txt for x in ["reef", "wreck", "drop-off", "artificial"]) else 5
     crowd_penalty = 8 if any(x in str(row.get("name", "")).lower() for x in ["fontao", "no.1", "barge"]) else 0
     boat_bonus = int(row.get("boat_intel_bonus", 0) or 0)
-    total = max(0, min(100, int((safety * 0.38) + bait_bonus + target_bonus + structure_bonus + boat_bonus - crowd_penalty)))
+    ocean_bonus = int((safe_float(row.get("ocean_score"), 50) - 50) * 0.22)
+
+    total = max(0, min(100, int((safety * 0.34) + bait_bonus + target_bonus + structure_bonus + boat_bonus + ocean_bonus - crowd_penalty)))
     return total, distance
 
 
-# ---------------------------
-# ---------------------------
-# Smart schedule signals: hourly wind/wave + tide context
-# ---------------------------
-def build_hourly_forecast_df(weather_json, marine_json):
-    rows = []
-    wh = weather_json.get("hourly", {}) if isinstance(weather_json, dict) else {}
-    mh = marine_json.get("hourly", {}) if isinstance(marine_json, dict) else {}
-    times = wh.get("time") or mh.get("time") or []
-    for i, t in enumerate(times):
-        def pick(src, key, default=None):
-            vals = src.get(key, []) if isinstance(src, dict) else []
-            return vals[i] if i < len(vals) else default
-        rows.append({
-            "time": pd.to_datetime(t, errors="coerce"),
-            "wind_speed": pick(wh, "wind_speed_10m"),
-            "wind_gusts": pick(wh, "wind_gusts_10m"),
-            "wind_dir": pick(wh, "wind_direction_10m"),
-            "wave_height": pick(mh, "wave_height"),
-            "wave_period": pick(mh, "wave_period"),
-            "wave_dir": pick(mh, "wave_direction"),
-        })
-    df = pd.DataFrame(rows)
-    for c in ["wind_speed", "wind_gusts", "wind_dir", "wave_height", "wave_period", "wave_dir"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df.dropna(subset=["time"]) if not df.empty else df
-
-@st.cache_data(ttl=21600, show_spinner=False)
-def fetch_worldtides_heights(lat, lon, start_ts, end_ts):
-    """Optional premium tide connector. Requires WORLDTIDES_API_KEY. Returns height time-series if available."""
-    key = get_secret("WORLDTIDES_API_KEY")
-    if not key:
-        return pd.DataFrame(), "No WORLDTIDES_API_KEY configured"
-    try:
-        start_unix = int(pd.Timestamp(start_ts).timestamp())
-        length = int((pd.Timestamp(end_ts) - pd.Timestamp(start_ts)).total_seconds())
-        url = "https://www.worldtides.info/api/v3"
-        params = {"heights": "", "lat": float(lat), "lon": float(lon), "start": start_unix, "length": max(3600, length), "key": key}
-        r = requests.get(url, params=params, timeout=18)
-        r.raise_for_status()
-        js = r.json()
-        rows = js.get("heights", [])
-        if not rows:
-            return pd.DataFrame(), js.get("error", "WorldTides returned no tide heights")
-        df = pd.DataFrame(rows)
-        if "dt" in df.columns:
-            df["time"] = pd.to_datetime(df["dt"], unit="s", errors="coerce")
-        if "date" in df.columns and "time" not in df.columns:
-            df["time"] = pd.to_datetime(df["date"], errors="coerce")
-        df["height"] = pd.to_numeric(df.get("height"), errors="coerce")
-        return df.dropna(subset=["time", "height"])[["time", "height"]], "WorldTides live tide"
-    except Exception as e:
-        return pd.DataFrame(), f"WorldTides unavailable: {e}"
-
-def tide_score_for_block(block_start, block_end, tide_df, manual_tide_mode="Unknown"):
-    """Returns 0-20 and narrative. Rising/turning tide gets stronger score for Durban planning."""
-    mode = str(manual_tide_mode or "Unknown")
-    if tide_df is not None and not tide_df.empty:
-        tdf = tide_df[(tide_df["time"] >= block_start) & (tide_df["time"] <= block_end)].copy()
-        if len(tdf) >= 2:
-            delta = float(tdf["height"].iloc[-1] - tdf["height"].iloc[0])
-            rng = float(tdf["height"].max() - tdf["height"].min())
-            if delta > 0.18:
-                return 18, f"rising tide push ({delta:+.2f} m)"
-            if abs(delta) <= 0.08 and rng <= 0.18:
-                return 14, "tide turn/holding water"
-            if delta < -0.18:
-                return 10, f"dropping tide ({delta:+.2f} m)"
-            return 12, "moderate tide movement"
-    manual_scores = {
-        "Rising tide": (18, "manual tide: rising push"),
-        "High tide / turn": (15, "manual tide: high/turn window"),
-        "Low tide / turn": (13, "manual tide: low/turn window"),
-        "Falling tide": (10, "manual tide: falling water"),
-        "Unknown": (8, "tide not connected yet"),
-    }
-    return manual_scores.get(mode, (8, "tide not connected yet"))
-
-def weather_score_for_block(block_start, block_end, hourly_df):
-    if hourly_df is None or hourly_df.empty:
-        return 10, "using current wind fallback"
-    h = hourly_df[(hourly_df["time"] >= block_start) & (hourly_df["time"] <= block_end)].copy()
-    if h.empty:
-        return 10, "no hourly data for this block"
-    wind = float(h["wind_speed"].mean()) if "wind_speed" in h else 0
-    gust = float(h["wind_gusts"].max()) if "wind_gusts" in h else wind
-    wave = float(h["wave_height"].mean()) if "wave_height" in h else 0
-    period = float(h["wave_period"].mean()) if "wave_period" in h else 0
-    score = 22
-    if wind > 28: score -= 10
-    elif wind > 20: score -= 6
-    elif wind > 14: score -= 3
-    if gust > 35: score -= 8
-    elif gust > 28: score -= 5
-    if wave > 2.0: score -= 10
-    elif wave > 1.5: score -= 6
-    elif wave > 1.1: score -= 3
-    if period and period < 8: score -= 3
-    narrative = f"avg wind {wind:.0f} km/h, gust {gust:.0f}, wave {wave:.1f} m"
-    return max(0, min(22, int(score))), narrative
-
-def ocean_score_for_spot_row(spot):
-    score = int(float(spot.get("ocean_score", 0) or 0))
-    sst = spot.get("sst_c", None)
-    chl = spot.get("chlorophyll_mg_m3", None)
-    signal = spot.get("ocean_signal", "")
-    narrative = f"SST {sst if pd.notna(sst) else 'n/a'}°C, chlorophyll {chl if pd.notna(chl) else 'n/a'}; {signal}"
-    return min(28, int(score * 0.55)), narrative
+def estimate_travel_minutes(distance_km, speed_kmh=32):
+    if speed_kmh <= 0:
+        speed_kmh = 32
+    return max(8, int((distance_km / speed_kmh) * 60))
 
 
-# Trip schedule planner
-# ---------------------------
-def minutes_between_times(start_t, end_t):
-    today = datetime.now().date()
-    start_dt = datetime.combine(today, start_t)
-    end_dt = datetime.combine(today, end_t)
+def tide_phase_score(mode):
+    mode = str(mode).lower()
+    if "push" in mode or "incoming" in mode:
+        return 12, "incoming/pushing tide window favours bait movement"
+    if "out" in mode:
+        return 6, "outgoing tide usable but monitor dirty water/current"
+    if "slack" in mode:
+        return -4, "slack tide can reduce movement; use structure and bait"
+    return 0, "manual tide not specified"
+
+
+def build_smart_schedule(start_dt, end_dt, spots_view, launch_lat, launch_lon, wind_speed, wave_h, tide_mode, target):
+    schedule = []
     if end_dt <= start_dt:
-        end_dt += timedelta(days=1)
-    return start_dt, end_dt, int((end_dt - start_dt).total_seconds() // 60)
+        return schedule
 
-def travel_minutes_between(prev_lat, prev_lon, next_lat, next_lon, cruise_speed_knots=18):
-    speed_kmh = max(5, float(cruise_speed_knots) * 1.852)
-    km = haversine_km(prev_lat, prev_lon, next_lat, next_lon)
-    return max(5, int(round((km / speed_kmh) * 60 + 4)))
+    total_minutes = int((end_dt - start_dt).total_seconds() / 60)
+    if total_minutes < 60:
+        return schedule
 
-# ---------------------------
-# Trip schedule planner
-# ---------------------------
-def build_trip_schedule(spots_ranked, launch_lat, launch_lon, start_t, end_t, selected_name, cruise_speed_knots=18, bait_first=True, hourly_df=None, tide_df=None, manual_tide_mode="Unknown"):
-    """Smart scheduler: prioritises selected spot, then dynamically allocates time using wind/wave, tide and SST/chlorophyll signals."""
-    if spots_ranked.empty:
-        return pd.DataFrame(), None
-    start_dt, end_dt, total_minutes = minutes_between_times(start_t, end_t)
-    if total_minutes < 45:
-        return pd.DataFrame(), "Fishing window is too short. Use at least 45 minutes."
+    ranked = spots_view.sort_values("score", ascending=False).head(5).copy()
+    if ranked.empty:
+        return schedule
 
-    ranked = spots_ranked.copy().reset_index(drop=True)
-    if selected_name and selected_name in ranked["name"].astype(str).tolist():
-        selected = ranked[ranked["name"].astype(str) == str(selected_name)]
-        others = ranked[ranked["name"].astype(str) != str(selected_name)]
-        ranked = pd.concat([selected, others], ignore_index=True)
+    tide_bonus, tide_note = tide_phase_score(tide_mode)
+    ranked["schedule_priority"] = ranked["score"] + tide_bonus + ranked["ocean_score"].fillna(50).astype(float) * 0.08
+    ranked = ranked.sort_values("schedule_priority", ascending=False)
 
-    rows = []
     current = start_dt
-    prev_lat, prev_lon = float(launch_lat), float(launch_lon)
 
-    # Optional bait phase, but only where the time window supports it.
-    if bait_first:
-        bait_mask = ranked.apply(lambda r: "bait" in (str(r.get("type", "")) + " " + str(r.get("target_species", "")) + " " + str(r.get("strategy_note", ""))).lower(), axis=1)
-        bait_rows = ranked[bait_mask]
-        if not bait_rows.empty and total_minutes >= 135:
-            bait = bait_rows.iloc[0]
-            travel = travel_minutes_between(prev_lat, prev_lon, bait["lat"], bait["lon"], cruise_speed_knots)
-            arrive = current + timedelta(minutes=travel)
-            planned = 35 if total_minutes < 300 else 45
-            depart = min(arrive + timedelta(minutes=planned), end_dt)
-            if depart > arrive:
-                w_score, w_note = weather_score_for_block(arrive, depart, hourly_df)
-                t_score, t_note = tide_score_for_block(arrive, depart, tide_df, manual_tide_mode)
-                o_score, o_note = ocean_score_for_spot_row(bait)
-                smart_score = min(100, int((float(bait.get("score", 0)) * 0.45) + w_score + t_score + o_score))
-                rows.append({
-                    "phase":"Bait stop", "spot":bait["name"], "start":arrive.strftime("%H:%M"), "end":depart.strftime("%H:%M"),
-                    "fish_minutes":int((depart-arrive).total_seconds()//60), "travel_minutes":travel,
-                    "depth":bait.get("depth","Unknown"), "base_score":int(bait.get("score",0)), "smart_score":smart_score,
-                    "lat":float(bait["lat"]), "lon":float(bait["lon"]),
-                    "why":f"Bait-first strategy. Wind: {w_note}. Tide: {t_note}. Ocean: {o_note}",
-                    "instruction":"Catch live bait / confirm bait balls on sonar. Move fast if no bait shows. Premium logic uses bait presence as the first decision gate."
-                })
-                current = depart
-                prev_lat, prev_lon = float(bait["lat"]), float(bait["lon"])
-                ranked = ranked[ranked["name"].astype(str) != str(bait["name"])].reset_index(drop=True)
+    bait_candidates = ranked[
+        ranked["type"].astype(str).str.lower().str.contains("bait", na=False)
+        | ranked["target_species"].astype(str).str.lower().str.contains("bait", na=False)
+        | ranked["strategy_note"].astype(str).str.lower().str.contains("bait", na=False)
+    ]
 
-    # Score candidate stops against available time blocks.
-    candidate_rows = []
-    remaining_minutes = int((end_dt - current).total_seconds() // 60)
-    if remaining_minutes <= 20:
-        return pd.DataFrame(rows), None
+    # Add bait stop when target benefits from live bait and enough time exists
+    if target in ["couta", "tuna", "dorade", "snoek", "general"] and total_minutes >= 180:
+        bait = bait_candidates.iloc[0] if not bait_candidates.empty else ranked.iloc[0]
+        bait_minutes = 45 if total_minutes < 300 else 60
+        end_bait = current + timedelta(minutes=bait_minutes)
+        schedule.append({
+            "start": current,
+            "end": end_bait,
+            "spot": bait["name"],
+            "phase": "Bait / first scan",
+            "depth": bait.get("depth", "Unknown"),
+            "lat": bait["lat"],
+            "lon": bait["lon"],
+            "instruction": "Collect live bait, confirm bait balls on sonar, and only stay longer if predator marks appear.",
+            "why": f"Premium logic: bait-first route because {target} usually improves when live bait and current movement align. {tide_note}. Ocean: {bait.get('ocean_note','')}",
+        })
+        current = end_bait + timedelta(minutes=estimate_travel_minutes(float(bait.get("distance_km", 8)) * 0.15, 30))
 
-    # Number of spots depends on total trip length; we avoid over-moving on short sessions.
-    if remaining_minutes <= 120:
-        block_pattern = [remaining_minutes]
-    elif remaining_minutes <= 240:
-        block_pattern = [90, remaining_minutes - 90]
-    elif remaining_minutes <= 420:
-        block_pattern = [120, 90, max(45, remaining_minutes - 210)]
-    else:
-        block_pattern = [150, 120, 90, 60, max(45, remaining_minutes - 420)]
+    remaining = int((end_dt - current).total_seconds() / 60)
+    if remaining <= 30:
+        return schedule
 
-    # Build provisional blocks and choose best spots for each block using smart score.
-    used_names = set()
-    for idx, desired_fish in enumerate(block_pattern):
+    # Allocate time: best spot gets biggest block, second spot gets next, final is fallback
+    usable = ranked.head(4).to_dict("records")
+    weights = [0.42, 0.30, 0.18, 0.10]
+    previous_lat, previous_lon = launch_lat, launch_lon
+
+    for idx, spot in enumerate(usable):
+        remaining = int((end_dt - current).total_seconds() / 60)
+        if remaining < 45:
+            break
+
+        travel = estimate_travel_minutes(haversine_km(previous_lat, previous_lon, spot["lat"], spot["lon"]), 32)
+        if schedule:
+            current = current + timedelta(minutes=min(travel, 25))
+
+        remaining = int((end_dt - current).total_seconds() / 60)
+        if remaining < 45:
+            break
+
+        block = int(total_minutes * weights[idx])
+        block = max(45, min(block, remaining))
+        if idx == len(usable) - 1:
+            block = remaining
+
+        end_block = min(current + timedelta(minutes=block), end_dt)
+
+        phase = "Primary drift" if idx == 0 else "Secondary drift" if idx == 1 else "Fallback / move if bite slows"
+        instruction = "Drift the structure edge. Reset up-current if bait/fish marks show. Move if no life after 30–40 minutes."
+        if idx == 0:
+            instruction = "Commit to this window first. Work the reef/current edge and do not chase too early."
+        elif idx == 1:
+            instruction = "Move only after the primary window. Use this as the pressure-release or second feeding line."
+
+        schedule.append({
+            "start": current,
+            "end": end_block,
+            "spot": spot["name"],
+            "phase": phase,
+            "depth": spot.get("depth", "Unknown"),
+            "lat": spot["lat"],
+            "lon": spot["lon"],
+            "instruction": instruction,
+            "why": f"Selected by premium schedule engine: score {int(spot['score'])}/100, ocean {int(spot.get('ocean_score', 50))}/100, wind {wind_speed:.0f} km/h, swell {wave_h:.1f} m, {tide_note}.",
+        })
+
+        current = end_block
+        previous_lat, previous_lon = spot["lat"], spot["lon"]
+
         if current >= end_dt:
             break
-        best = None
-        best_payload = None
-        for _, spot in ranked.iterrows():
-            if str(spot["name"]) in used_names:
-                continue
-            travel = travel_minutes_between(prev_lat, prev_lon, spot["lat"], spot["lon"], cruise_speed_knots)
-            arrive = current + timedelta(minutes=travel)
-            if arrive >= end_dt:
-                continue
-            remaining_after_arrival = int((end_dt - arrive).total_seconds() // 60)
-            if remaining_after_arrival < 25:
-                continue
-            fish_minutes = min(int(desired_fish), remaining_after_arrival)
-            depart = arrive + timedelta(minutes=fish_minutes)
-            w_score, w_note = weather_score_for_block(arrive, depart, hourly_df)
-            t_score, t_note = tide_score_for_block(arrive, depart, tide_df, manual_tide_mode)
-            o_score, o_note = ocean_score_for_spot_row(spot)
-            distance_penalty = min(10, int(haversine_km(prev_lat, prev_lon, spot["lat"], spot["lon"]) / 3))
-            selected_bonus = 10 if idx == 0 and selected_name and str(spot["name"]) == str(selected_name) else 0
-            base = float(spot.get("score", 0))
-            smart_score = min(100, int((base * 0.42) + w_score + t_score + o_score + selected_bonus - distance_penalty))
-            payload = (smart_score, spot, travel, arrive, depart, fish_minutes, w_note, t_note, o_note)
-            if best is None or smart_score > best:
-                best = smart_score
-                best_payload = payload
-        if not best_payload:
-            break
-        smart_score, spot, travel, arrive, depart, fish_minutes, w_note, t_note, o_note = best_payload
-        phase = "Primary premium window" if idx == 0 else ("Secondary tide/SST window" if idx == 1 else f"Smart rotation {idx+1}")
-        rows.append({
-            "phase":phase, "spot":spot["name"], "start":arrive.strftime("%H:%M"), "end":depart.strftime("%H:%M"),
-            "fish_minutes":int(fish_minutes), "travel_minutes":int(travel), "depth":spot.get("depth","Unknown"),
-            "base_score":int(spot.get("score",0)), "smart_score":int(smart_score),
-            "lat":float(spot["lat"]), "lon":float(spot["lon"]),
-            "why":f"Premium schedule weighted this stop using wind, tide, SST/chlorophyll and distance. Wind: {w_note}. Tide: {t_note}. Ocean: {o_note}",
-            "instruction":"Fish the edge/current line first. If bait, birds or sonar are absent after 25-30 min, rotate according to this plan."
-        })
-        used_names.add(str(spot["name"]))
-        current = depart
-        prev_lat, prev_lon = float(spot["lat"]), float(spot["lon"])
 
-    if rows:
-        home = travel_minutes_between(prev_lat, prev_lon, launch_lat, launch_lon, cruise_speed_knots)
-        rows[-1]["instruction"] += f" Allow about {home} min to run back to launch."
-    return pd.DataFrame(rows), None
+    return schedule
 
 
 # ---------------------------
@@ -703,6 +618,7 @@ SPECIES_GUIDE = {
     },
 }
 
+
 def image_or_note(path_str, caption):
     path = ROOT / path_str
     if path.exists():
@@ -710,9 +626,10 @@ def image_or_note(path_str, caption):
     else:
         st.info(f"Add image: {path_str}")
 
+
 def render_species_guide(target):
     guide = SPECIES_GUIDE.get(str(target).lower(), SPECIES_GUIDE["general"])
-    st.subheader("🎣 Bait, setup and trace for selected target")
+    st.subheader("🎣 Bait, setup and trace")
     st.markdown(f"""
 <div class="best-card">
 <h3>{str(target).upper()} setup</h3>
@@ -729,9 +646,103 @@ def render_species_guide(target):
     with c3:
         image_or_note(guide["setup_img"], "Setup")
 
+
 # ---------------------------
-# Map
+# Pages
 # ---------------------------
+def intro_page():
+    st.title("🎣 CastIQ Pro Durban")
+    st.markdown("""
+### Fishing intelligence for Durban offshore and bay boat anglers
+
+CastIQ Pro helps solve a common problem: anglers often launch with static GPS marks, scattered weather apps, uncertain tide timing and limited visibility of bait movement.
+
+The app turns those fragments into one practical decision:
+> **Where should I go, when should I fish it, and what should I use?**
+
+It combines reef marks, live marine conditions, vessel activity, drift logic, species bait guidance, ocean intelligence and time-based planning into a structured fishing plan.
+""")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Decision engine", "Spot + time")
+    c2.metric("Premium signals", "SST + CHL + AIS")
+    c3.metric("Output", "Fishing schedule")
+
+    st.info("Use the Trip Planner tab to select species, fishing time, and build your recommended schedule.")
+
+
+def packages_page():
+    st.title("💼 Packages")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("""
+<div class="big-card">
+<h2>Standard</h2>
+<h3>R1,000 / month</h3>
+<p>Built for serious recreational anglers who want better planning and fewer wasted trips.</p>
+<ul>
+<li>Smart fishing spot recommendations</li>
+<li>Time-based fishing schedule</li>
+<li>Species bait, setup and trace guidance</li>
+<li>Weather and marine condition checks</li>
+<li>Basic boat heatmap / upload mode</li>
+<li>Mobile access</li>
+</ul>
+</div>
+""", unsafe_allow_html=True)
+        st.link_button("💳 Subscribe Standard", PAYGATE_STANDARD_URL, use_container_width=True)
+
+    with c2:
+        st.markdown("""
+<div class="best-card">
+<h2>Premium</h2>
+<h3>R20,000 once-off</h3>
+<p>Professional-grade fishing intelligence for advanced anglers, charter operators and offshore teams.</p>
+<ul>
+<li>Advanced AIS vessel intelligence</li>
+<li>NOAA SST and chlorophyll ocean signals</li>
+<li>Smart schedule using wind, swell, tide and ocean data</li>
+<li>Drift prediction engine</li>
+<li>Private catch-history learning layer</li>
+<li>Premium “why this spot now” explanations</li>
+<li>Priority feature updates</li>
+</ul>
+</div>
+""", unsafe_allow_html=True)
+        st.link_button("🚀 Unlock Premium", PAYGATE_PREMIUM_URL, use_container_width=True)
+
+
+def regulations_page():
+    st.title("📜 Regulations & Safety")
+    st.warning("Planning guide only. Always verify latest South African marine recreational fishing rules, permits, MPAs, weather and skipper safety requirements before launch.")
+
+    st.markdown("""
+### Core reminders
+- Carry the correct recreational fishing permit.
+- Recreational catch may not be sold.
+- Respect species-specific size limits, bag limits and closed seasons.
+- Check Marine Protected Areas and restricted zones.
+- Confirm boat safety equipment, comms, fuel, surf launch risk and weather window.
+""")
+
+    regs = pd.DataFrame([
+        {"Topic": "Shad / Elf", "Reminder": "Closed season generally applies 1 September to 30 November. Verify latest rule before keeping fish."},
+        {"Topic": "Kob", "Reminder": "Size and bag limits apply. Release undersize fish safely."},
+        {"Topic": "Couta", "Reminder": "Bag limits apply. Confirm latest recreational limit."},
+        {"Topic": "Tuna", "Reminder": "Species-specific rules may apply depending on tuna type."},
+        {"Topic": "Reef fish / Rockcod", "Reminder": "Many reef species have strict size/bag restrictions. Identify species before keeping."},
+        {"Topic": "Overall bag", "Reminder": "Overall cumulative daily limits may apply in addition to species-specific limits."},
+    ])
+    st.dataframe(regs, use_container_width=True, hide_index=True)
+
+    st.subheader("Pre-launch checklist")
+    st.checkbox("I checked the latest permit and recreational fishing regulations")
+    st.checkbox("I checked size, bag and closed-season rules for my target species")
+    st.checkbox("I checked MPAs / restricted areas")
+    st.checkbox("I checked weather, swell, wind, fuel and safety equipment")
+
+
 def render_map(spots_view, stops, drift_lines, ais_df, launch_lat, launch_lon, selected_spot=None):
     try:
         import folium
@@ -741,6 +752,7 @@ def render_map(spots_view, stops, drift_lines, ais_df, launch_lat, launch_lon, s
         st.info("Install maps: pip install folium streamlit-folium")
         st.map(spots_view[["lat", "lon"]])
         return
+
     m = folium.Map(location=[launch_lat, launch_lon], zoom_start=11, tiles="OpenStreetMap")
     folium.Marker([launch_lat, launch_lon], tooltip="Launch", popup="Durban launch reference", icon=folium.Icon(color="green", icon="flag")).add_to(m)
 
@@ -754,7 +766,19 @@ def render_map(spots_view, stops, drift_lines, ais_df, launch_lat, launch_lon, s
 
     cluster = MarkerCluster(name="Fishing marks").add_to(m)
     for _, r in spots_view.iterrows():
-        popup = f"<b>{r['name']}</b><br>Score: {r['score']}/100<br>Depth: {r.get('depth','Unknown')}<br>Distance: {r['distance_km']} km<br>Boat stops nearby: {r.get('boat_stop_count_nearby',0)}<br><a href='{google_maps_url(r['lat'], r['lon'])}' target='_blank'>Google Maps</a> | <a href='{navionics_url(r['lat'], r['lon'])}' target='_blank'>Navionics</a><br>{r.get('strategy_note','')}"
+        popup = f"""
+        <b>{r['name']}</b><br>
+        Score: {r['score']}/100<br>
+        Depth: {r.get('depth','Unknown')}<br>
+        Distance: {r['distance_km']} km<br>
+        Ocean: {r.get('ocean_score','N/A')}/100<br>
+        SST: {r.get('sst_c','N/A')}°C<br>
+        Chlorophyll: {r.get('chlorophyll','N/A')}<br>
+        Boat stops nearby: {r.get('boat_stop_count_nearby',0)}<br>
+        <a href='{google_maps_url(r['lat'], r['lon'])}' target='_blank'>Google Maps</a> |
+        <a href='{navionics_url(r['lat'], r['lon'])}' target='_blank'>Navionics</a><br>
+        {r.get('strategy_note','')}
+        """
         folium.Marker([r["lat"], r["lon"]], tooltip=f"{r['name']} | {r['score']}", popup=popup).add_to(cluster)
 
     if not stops.empty:
@@ -771,23 +795,238 @@ def render_map(spots_view, stops, drift_lines, ais_df, launch_lat, launch_lon, s
     for line in drift_lines:
         folium.PolyLine([line["start"], line["end"]], tooltip=f"Estimated drift {line['bearing']:.0f}° / {line['distance_km']:.1f} km", weight=3).add_to(m)
         folium.Marker(line["end"], icon=folium.Icon(color="blue", icon="arrow-down"), tooltip="Estimated drift end").add_to(m)
+
     folium.LayerControl().add_to(m)
     st_folium(m, width=None, height=650)
 
-# ---------------------------
-# ---------------------------
-# UI
-# ---------------------------
-st.title("🎣 CastIQ Pro Durban")
-st.caption("Durban boat fishing intelligence: recommendations first, NOAA ocean signals, map below, mobile-ready.")
 
+def trip_planner_page():
+    st.title("🎣 Trip Planner")
+    st.caption("Recommendations first, map at the bottom, mobile-friendly.")
+
+    if "selected_destination_name" not in st.session_state:
+        st.session_state.selected_destination_name = ""
+
+    with st.expander("⚙️ Trip setup", expanded=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            launch_lat = st.number_input("Launch latitude", value=DURBAN_LAUNCH[0], format="%.6f")
+        with c2:
+            launch_lon = st.number_input("Launch longitude", value=DURBAN_LAUNCH[1], format="%.6f")
+
+        c3, c4 = st.columns(2)
+        with c3:
+            target = st.selectbox("Target species", ["couta", "tuna", "snoek", "dorade", "kob", "general", "bait"], index=5)
+        with c4:
+            max_spots = st.slider("Show recommendations", 3, 20, 8)
+
+        c5, c6, c7 = st.columns(3)
+        with c5:
+            start_t = st.time_input("Start fishing time", value=time(6, 0))
+        with c6:
+            end_t = st.time_input("End fishing time", value=time(11, 0))
+        with c7:
+            tide_mode = st.selectbox("Tide signal", ["Incoming / pushing", "Outgoing", "Slack / unknown"], index=0)
+
+        use_ocean = st.toggle("Use live NOAA SST + chlorophyll scoring", value=True)
+
+    with st.expander("🛰️ Boat intelligence / AIS upload", expanded=False):
+        provider = st.selectbox("Live provider", ["None / CSV upload", "AISHub live", "MarineTraffic placeholder"])
+        uploaded = st.file_uploader("Upload AIS/GPS CSV", type=["csv"])
+        c8, c9, c10 = st.columns(3)
+        with c8:
+            max_speed = st.slider("Slow speed threshold", 1.0, 6.0, 3.0, 0.5)
+        with c9:
+            min_points = st.slider("Min repeated stop points", 1, 8, 2)
+        with c10:
+            radius_m = st.slider("Cluster radius metres", 250, 1500, 550, 50)
+        drift_hours = st.slider("Drift projection hours", 0.5, 4.0, 1.5, 0.5)
+
+    spots = load_spots()
+    w, m = get_open_meteo(launch_lat, launch_lon)
+    cur_w = w.get("current", {}) if isinstance(w, dict) else {}
+    cur_m = m.get("current", {}) if isinstance(m, dict) else {}
+
+    wind_speed = safe_float(cur_w.get("wind_speed_10m"), 0)
+    wind_dir = safe_float(cur_w.get("wind_direction_10m"), 0)
+    gust = safe_float(cur_w.get("wind_gusts_10m"), 0)
+    wave_h = safe_float(cur_m.get("wave_height"), 0)
+    wave_dir = safe_float(cur_m.get("wave_direction"), wind_dir)
+    wave_period = safe_float(cur_m.get("wave_period"), 0)
+
+    live_df = pd.DataFrame()
+    if provider == "AISHub live":
+        username = get_secret("AISHUB_USERNAME")
+        if username:
+            try:
+                live_df = fetch_aishub_live(username, DURBAN_BBOX)
+                save_live_cache(live_df)
+                st.success(f"AISHub live pull complete: {len(live_df)} records cached.")
+            except Exception as e:
+                st.warning(f"AISHub live pull failed. Using cached/upload/manual data. Detail: {e}")
+        else:
+            st.warning("Add AISHUB_USERNAME to Streamlit secrets or environment variables.")
+    elif provider == "MarineTraffic placeholder":
+        st.info("MarineTraffic access depends on your subscribed endpoint. Use CSV/manual upload until endpoint is confirmed.")
+
+    ais_df = load_cached_and_manual_tracks(uploaded)
+    if not live_df.empty:
+        ais_df = pd.concat([ais_df, live_df], ignore_index=True)
+        ais_df = normalise_columns(ais_df)
+
+    st.subheader("🌊 Conditions now")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Wind", f"{wind_speed:.0f} km/h", f"gust {gust:.0f}")
+    c2.metric("Direction", f"{wind_dir:.0f}°")
+    c3.metric("Wave", f"{wave_h:.1f} m")
+    c4.metric("Period", f"{wave_period:.0f} sec")
+
+    stops = detect_fishing_stops(ais_df, max_speed=max_speed, min_points=min_points, radius_m=radius_m)
+    spots = enrich_spots(spots, stops)
+
+    # Enrich ocean only on candidate shortlist for performance
+    base_scores, distances = [], []
+    for _, r in spots.iterrows():
+        s, d = score_spot(r.assign(ocean_score=50) if hasattr(r, "assign") else r, wind_speed, gust, wave_h, wave_period, launch_lat, launch_lon, target)
+        base_scores.append(s)
+        distances.append(round(d, 1))
+    spots["base_score"] = base_scores
+    spots["distance_km"] = distances
+
+    candidates = spots.sort_values("base_score", ascending=False).head(max_spots).copy()
+    candidates = enrich_ocean_for_spots(candidates, enabled=use_ocean)
+
+    scores = []
+    for _, r in candidates.iterrows():
+        s, _ = score_spot(r, wind_speed, gust, wave_h, wave_period, launch_lat, launch_lon, target)
+        scores.append(s)
+    candidates["score"] = scores
+    spots_view = candidates.sort_values("score", ascending=False).head(max_spots).copy()
+
+    render_species_guide(target)
+
+    start_dt = datetime.combine(date.today(), start_t)
+    end_dt = datetime.combine(date.today(), end_t)
+    if end_dt <= start_dt:
+        end_dt += timedelta(days=1)
+
+    schedule = build_smart_schedule(start_dt, end_dt, spots_view, launch_lat, launch_lon, wind_speed, wave_h, tide_mode, target)
+
+    st.subheader("🧭 Smart fishing schedule")
+    st.markdown("""
+<div class="best-card">
+<b>Premium schedule engine:</b> This plan uses wind, swell, SST, chlorophyll, tide signal, travel time, species logic and reef/boat intelligence to decide where to spend your fishing window.
+</div>
+""", unsafe_allow_html=True)
+
+    if not schedule:
+        st.warning("Not enough time or data to build a schedule. Extend your start/end window.")
+    else:
+        for idx, step in enumerate(schedule, start=1):
+            with st.container(border=True):
+                st.markdown(f"""
+### {idx}. {step['phase']}: {step['spot']}
+**Time:** `{step['start'].strftime('%H:%M')}` – `{step['end'].strftime('%H:%M')}`  
+**Depth:** `{step['depth']}`  
+**Coordinates:** `{float(step['lat']):.6f}, {float(step['lon']):.6f}`  
+**Instruction:** {step['instruction']}  
+**Why this slot:** {step['why']}
+""")
+
+    available_names = [str(x) for x in spots_view["name"].tolist()]
+    if available_names and (not st.session_state.selected_destination_name or st.session_state.selected_destination_name not in available_names):
+        st.session_state.selected_destination_name = available_names[0]
+
+    selected_spot = None
+    selected_rows = spots_view[spots_view["name"].astype(str) == st.session_state.selected_destination_name]
+    if not selected_rows.empty:
+        selected_spot = selected_rows.iloc[0].to_dict()
+
+    st.subheader("🎯 Recommendations")
+    if selected_spot is not None:
+        st.markdown(f"""
+<div class="best-card">
+<h3>🔥 Active destination: {selected_spot['name']}</h3>
+<div class="small-muted">Score {int(selected_spot['score'])}/100 · Depth {selected_spot.get('depth','Unknown')} · {float(selected_spot['distance_km']):.1f} km from launch · Ocean {int(selected_spot.get('ocean_score', 50))}/100 · Coordinates {float(selected_spot['lat']):.6f}, {float(selected_spot['lon']):.6f}</div>
+<div class="small-muted">{selected_spot.get('ocean_note','')}</div>
+</div>
+""", unsafe_allow_html=True)
+        a, b = st.columns(2)
+        with a:
+            st.link_button("🧭 Open in Google Maps", google_maps_url(selected_spot["lat"], selected_spot["lon"]), use_container_width=True)
+        with b:
+            st.link_button("🌊 Open in Navionics", navionics_url(selected_spot["lat"], selected_spot["lon"]), use_container_width=True)
+
+    for i, (_, r) in enumerate(spots_view.iterrows(), start=1):
+        is_selected = selected_spot is not None and str(r["name"]) == str(selected_spot["name"])
+        with st.container(border=True):
+            st.markdown(f"""
+### {'✅' if is_selected else '📍'} #{i} {r['name']} — {int(r['score'])}/100
+**Coordinates:** `{float(r['lat']):.6f}, {float(r['lon']):.6f}`  
+**Depth:** `{r.get('depth','Unknown')}` · **Distance:** `{float(r['distance_km']):.1f} km` · **Ocean:** `{int(r.get('ocean_score', 50))}/100` · **Boat stops nearby:** `{r.get('boat_stop_count_nearby', 0)}`  
+**Ocean signal:** {r.get('ocean_note','')}  
+{r.get('strategy_note','')}
+""")
+            if is_selected:
+                st.success("Selected. The map route below is aligned to this spot.")
+            else:
+                if st.button("🎯 Use this spot", key=f"use_{i}_{clean_key(r['name'])}"):
+                    st.session_state.selected_destination_name = str(r["name"])
+                    st.rerun()
+
+    drift_base = stops if not stops.empty else spots_view.rename(columns={"name": "vessels"}).assign(stop_points=1)
+    drift_lines = compute_drift_lines(drift_base, wind_dir, wind_speed, wave_dir, wave_h, hours=drift_hours)
+
+    st.subheader("🗺️ Map, route, heatmap and drift")
+    st.caption("Map is below the recommendations for mobile use. Selected destination is red; route is drawn automatically.")
+    render_map(spots_view, stops, drift_lines, ais_df, launch_lat, launch_lon, selected_spot=selected_spot)
+
+    st.divider()
+    t1, t2, t3, t4 = st.tabs(["Ocean intelligence", "Detected boat zones", "AIS/GPS records", "Setup notes"])
+    with t1:
+        st.write("NOAA ocean signals for the recommendation shortlist.")
+        st.dataframe(spots_view[["name", "lat", "lon", "depth", "sst_c", "chlorophyll", "ocean_score", "ocean_status", "ocean_note"]], use_container_width=True)
+        st.download_button("Download ocean_intelligence.csv", spots_view.to_csv(index=False), "ocean_intelligence.csv", "text/csv")
+    with t2:
+        if stops.empty:
+            st.info("No repeated slow/stop zones detected yet. Upload vessel_tracks.csv or enable AISHub live.")
+        else:
+            st.dataframe(stops, use_container_width=True)
+            st.download_button("Download detected_hot_zones.csv", stops.to_csv(index=False), "detected_hot_zones.csv", "text/csv")
+    with t3:
+        st.write(f"Records loaded: {len(ais_df)}")
+        if not ais_df.empty:
+            st.dataframe(ais_df.sort_values("timestamp", ascending=False).head(500), use_container_width=True)
+            st.download_button("Download combined_vessel_tracks.csv", ais_df.to_csv(index=False), "combined_vessel_tracks.csv", "text/csv")
+    with t4:
+        st.markdown(r"""
+### Cloud deployment files
+Keep these at the root of your GitHub repo:
+- `app.py`
+- `requirements.txt`
+- `durban_boat_fishing_spots.csv`
+- `data/vessel_tracks.csv`
+- `images/` folder
+
+### Manual CSV format
+```csv
+vessel_name,mmsi,timestamp,lat,lon,speed_knots,course_deg,source
+Example Boat,123456789,2026-05-01 07:15,-29.812,31.095,2.1,44,manual sighting
+```
+
+Planning tool only. Verify weather, surf-launch risk, skipper limits, fuel, comms, charts and legal boundaries before going offshore.
+""")
+
+
+# ---------------------------
+# UI Styling + Navigation
+# ---------------------------
 st.markdown("""
 <style>
 .block-container {padding-top: 1rem; padding-bottom: 2rem; max-width: 1100px;}
 [data-testid="stSidebar"] {display: none;}
 .big-card {border: 1px solid rgba(49,51,63,.18); border-radius: 18px; padding: 16px; margin-bottom: 12px;}
 .best-card {border: 2px solid rgba(255,75,75,.55); border-radius: 22px; padding: 18px; margin-bottom: 14px; background: rgba(255,75,75,.06);}
-.schedule-card {border: 1px solid rgba(0,120,255,.25); border-left: 6px solid rgba(0,120,255,.55); border-radius: 18px; padding: 14px; margin-bottom: 10px; background: rgba(0,120,255,.04);}
 .small-muted {opacity: .78; font-size: .92rem;}
 div.stButton > button {width: 100%; min-height: 48px; border-radius: 14px; font-weight: 700;}
 div[data-testid="stMetric"] {border: 1px solid rgba(49,51,63,.14); border-radius: 16px; padding: 10px;}
@@ -799,280 +1038,21 @@ div[data-testid="stMetric"] {border: 1px solid rgba(49,51,63,.14); border-radius
 </style>
 """, unsafe_allow_html=True)
 
-if "selected_destination_name" not in st.session_state:
-    st.session_state.selected_destination_name = ""
+tab_home, tab_trip, tab_regs, tab_packages = st.tabs([
+    "🏠 Home",
+    "🎣 Trip Planner",
+    "📜 Regulations",
+    "💼 Packages",
+])
 
-with st.expander("⚙️ Trip setup", expanded=False):
-    c1, c2 = st.columns(2)
-    with c1:
-        launch_lat = st.number_input("Launch latitude", value=DURBAN_LAUNCH[0], format="%.6f")
-    with c2:
-        launch_lon = st.number_input("Launch longitude", value=DURBAN_LAUNCH[1], format="%.6f")
-    c3, c4 = st.columns(2)
-    with c3:
-        target = st.selectbox("Target species", ["couta", "tuna", "snoek", "dorade", "kob", "general", "bait"], index=5)
-    with c4:
-        max_spots = st.slider("Show recommendations", 3, 20, 8)
-    c8, c9, c10 = st.columns(3)
-    with c8:
-        fishing_start = st.time_input("Start fishing time", value=datetime.strptime("06:00", "%H:%M").time())
-    with c9:
-        fishing_end = st.time_input("End fishing time", value=datetime.strptime("11:00", "%H:%M").time())
-    with c10:
-        cruise_speed_knots = st.slider("Boat cruise speed", 8, 30, 18)
-    bait_first = st.toggle("Plan bait stop first when useful", value=True)
-    tide_mode = st.selectbox("Tide signal", ["Auto WorldTides if key", "Rising tide", "High tide / turn", "Low tide / turn", "Falling tide", "Unknown"], index=0)
-    use_ocean_intel = st.toggle("Use NOAA SST + chlorophyll ocean intelligence", value=True)
+with tab_home:
+    intro_page()
 
-with st.expander("🛰️ Boat intelligence / AIS upload", expanded=False):
-    provider = st.selectbox("Live provider", ["None / CSV upload", "AISHub live", "MarineTraffic placeholder"])
-    uploaded = st.file_uploader("Upload AIS/GPS CSV", type=["csv"])
-    c5, c6, c7 = st.columns(3)
-    with c5:
-        max_speed = st.slider("Slow speed threshold", 1.0, 6.0, 3.0, 0.5)
-    with c6:
-        min_points = st.slider("Min repeated stop points", 1, 8, 2)
-    with c7:
-        radius_m = st.slider("Cluster radius metres", 250, 1500, 550, 50)
-    drift_hours = st.slider("Drift projection hours", 0.5, 4.0, 1.5, 0.5)
+with tab_trip:
+    trip_planner_page()
 
-spots = load_spots()
-w, m = get_open_meteo(launch_lat, launch_lon)
-cur_w = w.get("current", {}) if isinstance(w, dict) else {}
-cur_m = m.get("current", {}) if isinstance(m, dict) else {}
-wind_speed = float(cur_w.get("wind_speed_10m", 0) or 0)
-wind_dir = float(cur_w.get("wind_direction_10m", 0) or 0)
-gust = float(cur_w.get("wind_gusts_10m", 0) or 0)
-wave_h = float(cur_m.get("wave_height", 0) or 0)
-wave_dir = float(cur_m.get("wave_direction", wind_dir) or wind_dir)
-wave_period = float(cur_m.get("wave_period", 0) or 0)
+with tab_regs:
+    regulations_page()
 
-live_df = pd.DataFrame()
-if provider == "AISHub live":
-    username = get_secret("AISHUB_USERNAME")
-    if username:
-        try:
-            live_df = fetch_aishub_live(username, DURBAN_BBOX)
-            save_live_cache(live_df)
-            st.success(f"AISHub live pull complete: {len(live_df)} records cached.")
-        except Exception as e:
-            st.warning(f"AISHub live pull failed. Using cached/upload/manual data. Detail: {e}")
-    else:
-        st.warning("Add AISHUB_USERNAME to Streamlit secrets or environment variables.")
-elif provider == "MarineTraffic placeholder":
-    if get_secret("MARINETRAFFIC_API_KEY"):
-        st.info("MarineTraffic key found. Add your subscribed endpoint URL shape before live pull can be enabled.")
-    else:
-        st.warning("Add MARINETRAFFIC_API_KEY after you subscribe to the correct MarineTraffic AIS service.")
-
-ais_df = load_cached_and_manual_tracks(uploaded)
-if not live_df.empty:
-    ais_df = pd.concat([ais_df, live_df], ignore_index=True)
-    ais_df = normalise_columns(ais_df)
-
-st.subheader("🌊 Conditions now")
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Wind", f"{wind_speed:.0f} km/h", f"gust {gust:.0f}")
-c2.metric("Direction", f"{wind_dir:.0f}°")
-c3.metric("Wave", f"{wave_h:.1f} m")
-c4.metric("Period", f"{wave_period:.0f} sec")
-
-forecast_df = build_hourly_forecast_df(w, m)
-_tide_start_dt, _tide_end_dt, _ = minutes_between_times(fishing_start, fishing_end)
-tide_df = pd.DataFrame()
-tide_source_note = "Manual/fallback tide signal"
-if tide_mode == "Auto WorldTides if key":
-    tide_df, tide_source_note = fetch_worldtides_heights(launch_lat, launch_lon, _tide_start_dt, _tide_end_dt)
-    manual_tide_mode = "Unknown"
-else:
-    manual_tide_mode = tide_mode
-
-st.markdown(f"""
-<div class="big-card">
-<b>💎 Premium intelligence considered in this plan</b><br>
-<span class="small-muted">The schedule is weighted by hourly wind/gusts, wave height/period, tide phase, NOAA SST, NOAA chlorophyll, travel time, spot depth and target species. Tide source: <b>{tide_source_note}</b>. These are the decision layers positioned for the Premium package; Standard users can see the simplified plan, while Premium unlocks the full signal explanation and downloadable plan.</span>
-</div>
-""", unsafe_allow_html=True)
-
-stops = detect_fishing_stops(ais_df, max_speed=max_speed, min_points=min_points, radius_m=radius_m)
-spots = enrich_spots(spots, stops)
-
-scores, distances = [], []
-for _, r in spots.iterrows():
-    s, d = score_spot(r, wind_speed, gust, wave_h, wave_period, launch_lat, launch_lon, target)
-    scores.append(s)
-    distances.append(round(d, 1))
-spots["score"] = scores
-spots["distance_km"] = distances
-spots_view = spots.sort_values("score", ascending=False).head(max_spots).copy()
-
-ocean_df = pd.DataFrame()
-if use_ocean_intel:
-    with st.spinner("Pulling NOAA SST + chlorophyll ocean intelligence..."):
-        spots_view, ocean_df = merge_ocean_intel(spots_view)
-
-render_species_guide(target)
-
-if use_ocean_intel:
-    st.subheader("🛰️ Ocean intelligence: SST + chlorophyll")
-    if ocean_df.empty:
-        st.info("NOAA ocean data did not return for this run. Recommendations still use weather, structure, boat-intel and distance.")
-    else:
-        oc1, oc2, oc3 = st.columns(3)
-        valid_sst = pd.to_numeric(ocean_df.get("sst_c"), errors="coerce").dropna()
-        valid_chl = pd.to_numeric(ocean_df.get("chlorophyll_mg_m3"), errors="coerce").dropna()
-        valid_score = pd.to_numeric(ocean_df.get("ocean_score"), errors="coerce").dropna()
-        oc1.metric("Avg SST", f"{valid_sst.mean():.1f}°C" if not valid_sst.empty else "n/a")
-        oc2.metric("Avg chlorophyll", f"{valid_chl.mean():.2f} mg/m³" if not valid_chl.empty else "n/a")
-        oc3.metric("Best ocean score", f"{int(valid_score.max())}/50" if not valid_score.empty else "n/a")
-        with st.expander("View SST/chlorophyll detail", expanded=False):
-            st.dataframe(ocean_df, use_container_width=True)
-            st.caption("Ocean data is from NOAA ERDDAP. Use it as a fishing intelligence signal, not as navigation or safety data.")
-
-available_names = [str(x) for x in spots_view["name"].tolist()]
-if available_names and (not st.session_state.selected_destination_name or st.session_state.selected_destination_name not in available_names):
-    st.session_state.selected_destination_name = available_names[0]
-
-selected_spot = None
-selected_rows = spots_view[spots_view["name"].astype(str) == st.session_state.selected_destination_name]
-if not selected_rows.empty:
-    selected_spot = selected_rows.iloc[0].to_dict()
-
-st.subheader("🎯 Recommendations")
-if selected_spot is not None:
-    st.markdown(f"""
-<div class="best-card">
-<h3>🔥 Active destination: {selected_spot['name']}</h3>
-<div class="small-muted">Score {int(selected_spot['score'])}/100 · Ocean {int(selected_spot.get('ocean_score',0) or 0)}/50 · Depth {selected_spot.get('depth','Unknown')} · {float(selected_spot['distance_km']):.1f} km from launch · Coordinates {float(selected_spot['lat']):.6f}, {float(selected_spot['lon']):.6f}</div>
-</div>
-""", unsafe_allow_html=True)
-    a, b = st.columns(2)
-    with a:
-        st.link_button("🧭 Open in Google Maps", google_maps_url(selected_spot["lat"], selected_spot["lon"]), use_container_width=True)
-    with b:
-        st.link_button("🌊 Open in Navionics", navionics_url(selected_spot["lat"], selected_spot["lon"]), use_container_width=True)
-
-for i, (_, r) in enumerate(spots_view.iterrows(), start=1):
-    is_selected = selected_spot is not None and str(r["name"]) == str(selected_spot["name"])
-    with st.container(border=True):
-        st.markdown(f"""
-### {'✅' if is_selected else '📍'} #{i} {r['name']} — {int(r['score'])}/100
-**Coordinates:** `{float(r['lat']):.6f}, {float(r['lon']):.6f}`  
-**Depth:** `{r.get('depth','Unknown')}` · **Distance:** `{float(r['distance_km']):.1f} km` · **Boat stops nearby:** `{r.get('boat_stop_count_nearby', 0)}`  
-**Ocean:** SST `{r.get('sst_c','n/a')}`°C · Chlorophyll `{r.get('chlorophyll_mg_m3','n/a')}` mg/m³ · Signal: {r.get('ocean_signal','n/a')}  
-{r.get('strategy_note','')}
-""")
-        if is_selected:
-            st.success("Selected. The map route below is aligned to this spot.")
-        else:
-            if st.button("🎯 Use this spot", key=f"use_{i}_{str(r['name']).replace(' ', '_').replace('/', '_')}"):
-                st.session_state.selected_destination_name = str(r["name"])
-                st.rerun()
-
-st.subheader("🕒 Fishing time schedule")
-schedule_df, schedule_warning = build_trip_schedule(
-    spots_view, launch_lat, launch_lon, fishing_start, fishing_end,
-    st.session_state.selected_destination_name, cruise_speed_knots=cruise_speed_knots, bait_first=bait_first,
-    hourly_df=forecast_df, tide_df=tide_df, manual_tide_mode=manual_tide_mode
-)
-if schedule_warning:
-    st.warning(schedule_warning)
-elif schedule_df.empty:
-    st.info("No schedule generated yet. Increase the time window or recommendation count.")
-else:
-    st.caption("Active selected destination is scheduled first, then the app rotates to the next best spots by score, distance and available time.")
-    for j, row in schedule_df.iterrows():
-        st.markdown(f"""
-<div class="schedule-card">
-<b>{j+1}. {row['start']}–{row['end']} · {row['phase']}: {row['spot']}</b><br>
-<span class="small-muted">Fish {int(row['fish_minutes'])} min · Travel {int(row['travel_minutes'])} min · Depth {row['depth']} · Smart score {int(row.get('smart_score', row.get('score', 0)))}/100 · Base {int(row.get('base_score', row.get('score', 0)))}/100</span><br>
-<b>Why this slot:</b> {row.get('why', 'Smart schedule signals applied')}<br>{row['instruction']}<br>
-<span class="small-muted">Coordinates: {float(row['lat']):.6f}, {float(row['lon']):.6f}</span>
-</div>
-""", unsafe_allow_html=True)
-    st.download_button("Download trip_schedule.csv", schedule_df.to_csv(index=False), "trip_schedule.csv", "text/csv", use_container_width=True)
-
-drift_base = stops if not stops.empty else spots_view.rename(columns={"name": "vessels"}).assign(stop_points=1)
-drift_lines = compute_drift_lines(drift_base, wind_dir, wind_speed, wave_dir, wave_h, hours=drift_hours)
-
-st.subheader("🗺️ Map, route, heatmap and drift")
-st.caption("Map is below the recommendations for mobile use. Selected destination is red; route is drawn automatically.")
-render_map(spots_view, stops, drift_lines, ais_df, launch_lat, launch_lon, selected_spot=selected_spot)
-
-st.divider()
-t1, t2, t3, t4, t5 = st.tabs(["Detected boat zones", "AIS/GPS records", "Ocean data", "Setup notes", "Packages"])
-with t1:
-    if stops.empty:
-        st.info("No repeated slow/stop zones detected yet. Upload vessel_tracks.csv or enable AISHub live.")
-    else:
-        st.dataframe(stops, use_container_width=True)
-        st.download_button("Download detected_hot_zones.csv", stops.to_csv(index=False), "detected_hot_zones.csv", "text/csv")
-with t2:
-    st.write(f"Records loaded: {len(ais_df)}")
-    if not ais_df.empty:
-        st.dataframe(ais_df.sort_values("timestamp", ascending=False).head(500), use_container_width=True)
-        st.download_button("Download combined_vessel_tracks.csv", ais_df.to_csv(index=False), "combined_vessel_tracks.csv", "text/csv")
-with t3:
-    if ocean_df.empty:
-        st.info("No ocean data loaded in this session.")
-    else:
-        st.dataframe(ocean_df, use_container_width=True)
-        st.download_button("Download ocean_intelligence.csv", ocean_df.to_csv(index=False), "ocean_intelligence.csv", "text/csv")
-
-with t4:
-    st.markdown(r"""
-### Local folder
-`C:\Users\Admin\Desktop\Durban Fishing`
-
-### Cloud deployment files
-Keep these at the root of your GitHub repo:
-- `app.py`
-- `requirements.txt`
-- `durban_boat_fishing_spots.csv`
-- `data/vessel_tracks.csv`
-
-### Manual CSV format
-```csv
-vessel_name,mmsi,timestamp,lat,lon,speed_knots,course_deg,source
-Example Boat,123456789,2026-05-01 07:15,-29.812,31.095,2.1,44,manual sighting
-```
-
-Planning tool only. Verify weather, surf-launch risk, skipper limits, fuel, comms, charts and legal boundaries before going offshore.
-""")
-with t5:
-    st.subheader("💼 CastIQ Pro Packages")
-    col_std, col_pre = st.columns(2)
-    with col_std:
-        st.markdown("""
-### Standard Usage — R1,000 / month
-For serious recreational anglers who want better daily decisions.
-
-Includes:
-- Mobile trip planner
-- Top spot recommendations
-- Species bait, trace and setup guidance
-- Time schedule with simplified weather and distance logic
-- Depth shown per recommendation
-- Basic map, route and download plan
-
-Best for: anglers who want a structured plan before launch.
-""")
-        st.link_button("💳 Subscribe: R1,000/month", "https://secure.paygate.co.za/payweb3/process.trans?REFERENCE=CASTIQ_STD_1000", use_container_width=True)
-    with col_pre:
-        st.markdown("""
-### Premium Intelligence — R20,000 once-off
-For elite anglers, charter operators and teams who want decision intelligence.
-
-Premium considers:
-- Hourly wind and gust changes
-- Swell height, period and direction
-- Tide phase / WorldTides live tide where configured
-- NOAA SST and temperature-break signal
-- NOAA chlorophyll / bait-productivity edge
-- AIS slow-zone / vessel heatmap intelligence
-- Travel time, depth, spot rotation and fallback logic
-- Downloadable execution schedule with the reason behind every stop
-
-Best for: users who want the app to say **where to go, when to move, and why**.
-""")
-        st.link_button("🚀 Unlock Premium: R20,000", "https://secure.paygate.co.za/payweb3/process.trans?REFERENCE=CASTIQ_PREM_20000", use_container_width=True)
+with tab_packages:
+    packages_page()
