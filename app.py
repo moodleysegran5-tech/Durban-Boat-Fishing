@@ -311,24 +311,54 @@ def render_map(spots_view, stops, drift_lines, ais_df, launch_lat, launch_lon, s
     st_folium(m, width=None, height=650)
 
 # ---------------------------
+# ---------------------------
 # UI
 # ---------------------------
-st.title("🎣 CastIQ Pro – Durban Boat Intelligence V3")
-st.caption("Runs from: C:\\Users\\Admin\\Desktop\\Durban Fishing | Live AIS where available + upload fallback + auto heatmap + drift prediction")
+st.title("🎣 CastIQ Pro Durban")
+st.caption("Durban boat fishing intelligence: recommendations first, map below, mobile-ready.")
 
-with st.sidebar:
-    st.header("⚙️ Trip Setup")
-    launch_lat = st.number_input("Launch latitude", value=DURBAN_LAUNCH[0], format="%.6f")
-    launch_lon = st.number_input("Launch longitude", value=DURBAN_LAUNCH[1], format="%.6f")
-    target = st.selectbox("Target species", ["couta", "tuna", "snoek", "dorade", "kob", "general", "bait"])
-    max_spots = st.slider("Show top spots", 5, 30, 12)
+st.markdown("""
+<style>
+.block-container {padding-top: 1rem; padding-bottom: 2rem; max-width: 1100px;}
+[data-testid="stSidebar"] {display: none;}
+.big-card {border: 1px solid rgba(49,51,63,.18); border-radius: 18px; padding: 16px; margin-bottom: 12px;}
+.best-card {border: 2px solid rgba(255,75,75,.55); border-radius: 22px; padding: 18px; margin-bottom: 14px; background: rgba(255,75,75,.06);}
+.small-muted {opacity: .78; font-size: .92rem;}
+div.stButton > button {width: 100%; min-height: 48px; border-radius: 14px; font-weight: 700;}
+div[data-testid="stMetric"] {border: 1px solid rgba(49,51,63,.14); border-radius: 16px; padding: 10px;}
+@media (max-width: 768px) {
+  .block-container {padding-left: .75rem; padding-right: .75rem;}
+  h1 {font-size: 1.65rem !important;}
+  h2, h3 {font-size: 1.25rem !important;}
+}
+</style>
+""", unsafe_allow_html=True)
 
-    st.header("🛰️ AIS / Boat Data")
+if "selected_destination_name" not in st.session_state:
+    st.session_state.selected_destination_name = ""
+
+with st.expander("⚙️ Trip setup", expanded=False):
+    c1, c2 = st.columns(2)
+    with c1:
+        launch_lat = st.number_input("Launch latitude", value=DURBAN_LAUNCH[0], format="%.6f")
+    with c2:
+        launch_lon = st.number_input("Launch longitude", value=DURBAN_LAUNCH[1], format="%.6f")
+    c3, c4 = st.columns(2)
+    with c3:
+        target = st.selectbox("Target species", ["couta", "tuna", "snoek", "dorade", "kob", "general", "bait"], index=5)
+    with c4:
+        max_spots = st.slider("Show recommendations", 3, 20, 8)
+
+with st.expander("🛰️ Boat intelligence / AIS upload", expanded=False):
     provider = st.selectbox("Live provider", ["None / CSV upload", "AISHub live", "MarineTraffic placeholder"])
     uploaded = st.file_uploader("Upload AIS/GPS CSV", type=["csv"])
-    max_speed = st.slider("Fishing/slow speed threshold (knots)", 1.0, 6.0, 3.0, 0.5)
-    min_points = st.slider("Minimum repeated stop points", 1, 8, 2)
-    radius_m = st.slider("Cluster radius metres", 250, 1500, 550, 50)
+    c5, c6, c7 = st.columns(3)
+    with c5:
+        max_speed = st.slider("Slow speed threshold", 1.0, 6.0, 3.0, 0.5)
+    with c6:
+        min_points = st.slider("Min repeated stop points", 1, 8, 2)
+    with c7:
+        radius_m = st.slider("Cluster radius metres", 250, 1500, 550, 50)
     drift_hours = st.slider("Drift projection hours", 0.5, 4.0, 1.5, 0.5)
 
 spots = load_spots()
@@ -353,7 +383,7 @@ if provider == "AISHub live":
         except Exception as e:
             st.warning(f"AISHub live pull failed. Using cached/upload/manual data. Detail: {e}")
     else:
-        st.warning("Add AISHUB_USERNAME to .streamlit/secrets.toml or environment variables.")
+        st.warning("Add AISHUB_USERNAME to Streamlit secrets or environment variables.")
 elif provider == "MarineTraffic placeholder":
     if get_secret("MARINETRAFFIC_API_KEY"):
         st.info("MarineTraffic key found. Add your subscribed endpoint URL shape before live pull can be enabled.")
@@ -365,12 +395,12 @@ if not live_df.empty:
     ais_df = pd.concat([ais_df, live_df], ignore_index=True)
     ais_df = normalise_columns(ais_df)
 
-st.subheader("🌊 Current Conditions")
+st.subheader("🌊 Conditions now")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Wind", f"{wind_speed:.0f} km/h", f"gust {gust:.0f}")
-c2.metric("Wind dir", f"{wind_dir:.0f}°")
+c2.metric("Direction", f"{wind_dir:.0f}°")
 c3.metric("Wave", f"{wave_h:.1f} m")
-c4.metric("Wave period", f"{wave_period:.0f} sec")
+c4.metric("Period", f"{wave_period:.0f} sec")
 
 stops = detect_fishing_stops(ais_df, max_speed=max_speed, min_points=min_points, radius_m=radius_m)
 spots = enrich_spots(spots, stops)
@@ -378,69 +408,58 @@ spots = enrich_spots(spots, stops)
 scores, distances = [], []
 for _, r in spots.iterrows():
     s, d = score_spot(r, wind_speed, gust, wave_h, wave_period, launch_lat, launch_lon, target)
-    scores.append(s); distances.append(round(d, 1))
+    scores.append(s)
+    distances.append(round(d, 1))
 spots["score"] = scores
 spots["distance_km"] = distances
 spots_view = spots.sort_values("score", ascending=False).head(max_spots).copy()
 
-# Destination selection: coordinates must align to the chosen recommendation.
-if "selected_destination_name" not in st.session_state:
-    st.session_state.selected_destination_name = str(spots_view.iloc[0]["name"]) if not spots_view.empty else ""
 available_names = [str(x) for x in spots_view["name"].tolist()]
-if available_names and st.session_state.selected_destination_name not in available_names:
+if available_names and (not st.session_state.selected_destination_name or st.session_state.selected_destination_name not in available_names):
     st.session_state.selected_destination_name = available_names[0]
-selected_name = st.sidebar.selectbox(
-    "🎯 Destination recommendation",
-    available_names,
-    index=available_names.index(st.session_state.selected_destination_name) if available_names else 0,
-    key="destination_choice_widget",
-    help="Choose the recommendation you want to run to. Destination coordinates below update from this choice.",
-) if available_names else ""
-
-# Store selection in a normal state key. This avoids Streamlit
-# blocking button updates to a widget-backed key later in the page.
-if selected_name:
-    st.session_state.selected_destination_name = str(selected_name)
 
 selected_spot = None
-if selected_name:
-    selected_rows = spots_view[spots_view["name"].astype(str) == selected_name]
-    if not selected_rows.empty:
-        selected_spot = selected_rows.iloc[0].to_dict()
-        st.sidebar.markdown("### 📍 Selected fishing destination")
-        st.sidebar.code(f"Lat: {float(selected_spot['lat']):.6f}\nLon: {float(selected_spot['lon']):.6f}\nScore: {int(selected_spot['score'])}/100\nDistance: {float(selected_spot['distance_km']):.1f} km")
-        st.sidebar.link_button("Open selected spot in Google Maps", google_maps_url(selected_spot["lat"], selected_spot["lon"]))
-        st.sidebar.link_button("Open selected spot in Navionics", navionics_url(selected_spot["lat"], selected_spot["lon"]))
+selected_rows = spots_view[spots_view["name"].astype(str) == st.session_state.selected_destination_name]
+if not selected_rows.empty:
+    selected_spot = selected_rows.iloc[0].to_dict()
+
+st.subheader("🎯 Recommendations")
+if selected_spot is not None:
+    st.markdown(f"""
+<div class="best-card">
+<h3>🔥 Active destination: {selected_spot['name']}</h3>
+<div class="small-muted">Score {int(selected_spot['score'])}/100 · {float(selected_spot['distance_km']):.1f} km from launch · Coordinates {float(selected_spot['lat']):.6f}, {float(selected_spot['lon']):.6f}</div>
+</div>
+""", unsafe_allow_html=True)
+    a, b = st.columns(2)
+    with a:
+        st.link_button("🧭 Open in Google Maps", google_maps_url(selected_spot["lat"], selected_spot["lon"]), use_container_width=True)
+    with b:
+        st.link_button("🌊 Open in Navionics", navionics_url(selected_spot["lat"], selected_spot["lon"]), use_container_width=True)
+
+for i, (_, r) in enumerate(spots_view.iterrows(), start=1):
+    is_selected = selected_spot is not None and str(r["name"]) == str(selected_spot["name"])
+    with st.container(border=True):
+        st.markdown(f"""
+### {'✅' if is_selected else '📍'} #{i} {r['name']} — {int(r['score'])}/100
+**Coordinates:** `{float(r['lat']):.6f}, {float(r['lon']):.6f}`  
+**Distance:** `{float(r['distance_km']):.1f} km` · **Boat stops nearby:** `{r.get('boat_stop_count_nearby', 0)}`  
+{r.get('strategy_note','')}
+""")
+        if is_selected:
+            st.success("Selected. The map route below is aligned to this spot.")
+        else:
+            if st.button("🎯 Use this spot", key=f"use_{i}_{str(r['name']).replace(' ', '_').replace('/', '_')}"):
+                st.session_state.selected_destination_name = str(r["name"])
+                st.rerun()
 
 drift_base = stops if not stops.empty else spots_view.rename(columns={"name": "vessels"}).assign(stop_points=1)
 drift_lines = compute_drift_lines(drift_base, wind_dir, wind_speed, wave_dir, wave_h, hours=drift_hours)
 
-left, right = st.columns([1.25, 0.75])
-with left:
-    st.subheader("🗺️ Live/Auto Heatmap + Drift Projection")
-    render_map(spots_view, stops, drift_lines, ais_df, launch_lat, launch_lon, selected_spot=selected_spot)
-with right:
-    st.subheader("🎯 Top Recommended Marks")
-    if selected_spot is not None:
-        st.success(f"Active destination: {selected_spot['name']} | {float(selected_spot['lat']):.6f}, {float(selected_spot['lon']):.6f}")
-    for i, (_, r) in enumerate(spots_view.head(8).iterrows(), start=1):
-        is_selected = selected_spot is not None and str(r['name']) == str(selected_spot['name'])
-        box = st.container(border=True)
-        with box:
-            st.markdown(f"""
-**#{i} {r['name']} — {r['score']}/100**  
-Coordinates: `{float(r['lat']):.6f}, {float(r['lon']):.6f}`  
-Distance: `{r['distance_km']} km` | Boat stops nearby: `{r.get('boat_stop_count_nearby',0)}`  
-[Google Maps]({google_maps_url(r['lat'], r['lon'])}) | [Navionics]({navionics_url(r['lat'], r['lon'])})  
-{r.get('strategy_note','')}
-""")
-            if is_selected:
-                st.info("Active destination. Map route and destination coordinates are aligned to this mark.")
-            else:
-                safe_name = str(r['name']).replace(' ', '_').replace('/', '_')
-                if st.button("Use this spot", key=f"use_spot_{i}_{safe_name}"):
-                    st.session_state.selected_destination_name = str(r['name'])
-                    st.rerun()
+st.subheader("🗺️ Map, route, heatmap and drift")
+st.caption("Map is below the recommendations for mobile use. Selected destination is red; route is drawn automatically.")
+render_map(spots_view, stops, drift_lines, ais_df, launch_lat, launch_lon, selected_spot=selected_spot)
+
 st.divider()
 t1, t2, t3 = st.tabs(["Detected boat zones", "AIS/GPS records", "Setup notes"])
 with t1:
@@ -456,23 +475,21 @@ with t2:
         st.download_button("Download combined_vessel_tracks.csv", ais_df.to_csv(index=False), "combined_vessel_tracks.csv", "text/csv")
 with t3:
     st.markdown(r"""
-### Folder to use
+### Local folder
 `C:\Users\Admin\Desktop\Durban Fishing`
 
-### Optional secrets file
-Create `.streamlit/secrets.toml`:
-```toml
-AISHUB_USERNAME = "your_aishub_username"
-MARINETRAFFIC_API_KEY = "your_marinetraffic_key"
-```
+### Cloud deployment files
+Keep these at the root of your GitHub repo:
+- `app.py`
+- `requirements.txt`
+- `durban_boat_fishing_spots.csv`
+- `data/vessel_tracks.csv`
 
 ### Manual CSV format
-Save your file as `data/vessel_tracks.csv` or upload it in the sidebar:
 ```csv
 vessel_name,mmsi,timestamp,lat,lon,speed_knots,course_deg,source
 Example Boat,123456789,2026-05-01 07:15,-29.812,31.095,2.1,44,manual sighting
 ```
 
-### Important
-This is a planning and fishing-intelligence tool. Always verify weather, surf launch risk, legal boundaries, skipper limits, fuel, comms and safety before going offshore.
+Planning tool only. Verify weather, surf-launch risk, skipper limits, fuel, comms, charts and legal boundaries before going offshore.
 """)
